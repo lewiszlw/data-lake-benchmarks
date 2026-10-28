@@ -19,28 +19,6 @@ lockfile 只解析出一个 Arrow 版本。
 存储字节数与压缩比通过 S3 对象大小测量。索引构建时间单独测量，避免污染写入与
 查询数字。结果见下文。
 
-## 目录结构
-
-仓库是一个 Cargo package，包含两个 binary。与引擎无关的代码放在 library 中；
-每个 binary 是一个 adapter。
-
-```
-Cargo.toml
-src/
-  lib.rs            Shared workload/config/statistics/ground truth
-  cli.rs            Phase and run-id parsing, result format
-  config.rs         Environment-driven configuration
-  data.rs           Deterministic data generation and exact ground truth
-  stats.rs          Latency and throughput helpers
-  bin/
-    indexlake-bench.rs
-    lance-bench.rs
-scripts/
-  run_all.sh                  End-to-end orchestration
-  s3_size.py                  Stdlib-only S3 SigV4 size/list/delete helper
-  init-indexlake-catalog.sql  PostgreSQL schema matching the pinned IndexLake rev
-```
-
 ## 依赖
 
 | 引擎 | Revision | Arrow |
