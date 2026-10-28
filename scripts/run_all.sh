@@ -77,8 +77,8 @@ echo "== queries =="
 "$IL" query-vector "$RUN_ID" | tee "$OUT/indexlake-query-vector.log"
 "$LA" query-vector "$RUN_ID" | tee "$OUT/lance-query-vector.log"
 
-# Mutations run last and use dedicated tables, so they never contaminate the
-# query datasets above.
+# Mutation and single-insert phases run after the queries and use dedicated
+# tables, so they never contaminate the query datasets above.
 echo "== conditional mutations =="
 "$IL" mutate-conditional "$RUN_ID" | tee "$OUT/indexlake-mutate-conditional.log"
 "$LA" mutate-conditional "$RUN_ID" | tee "$OUT/lance-mutate-conditional.log"
@@ -95,5 +95,18 @@ IL_DELETE_PREFIX="$(sed -n 's/.*table=scalar_delete_cond .*prefix=\([^ ]*\).*/\1
     echo -n "lance_update_cond    "; python3 "$S3" size "$LA_PREFIX/scalar_update_cond"
     echo -n "lance_delete_cond    "; python3 "$S3" size "$LA_PREFIX/scalar_delete_cond"
 } | tee "$OUT/sizes-after-mutation.txt"
+
+echo "== single-row inserts =="
+"$IL" insert-single "$RUN_ID" | tee "$OUT/indexlake-insert-single.log"
+"$LA" insert-single "$RUN_ID" | tee "$OUT/lance-insert-single.log"
+
+IL_INSERT_PREFIX="$(sed -n 's/.*table=scalar_insert_single .*prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-insert-single.log" | tail -1)"
+: "${IL_INSERT_PREFIX:?failed to parse indexlake single-insert prefix}"
+
+{
+    echo "stage=after_single_insert"
+    echo -n "indexlake_insert_single "; python3 "$S3" size "$IL_INSERT_PREFIX"
+    echo -n "lance_insert_single    "; python3 "$S3" size "$LA_PREFIX/scalar_insert_single"
+} | tee "$OUT/sizes-after-single-insert.txt"
 
 echo "done: $OUT"

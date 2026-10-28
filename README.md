@@ -14,6 +14,7 @@ Both engines are consumed directly from git and pinned to revisions that use
 | Vector search | Top-10 ANN over 100k vectors with HNSW (L2) |
 | Conditional update | `bucket = id % 100` matches 1% of scalar rows; set `payload` to a fixed 128-byte value |
 | Conditional delete | `bucket = id % 100` matches 1% of scalar rows |
+| Single-row insert | Append one row at a time into a dedicated seeded table, **no indexes** |
 
 Storage bytes and compression ratios are measured from S3 object sizes. Index
 build time is measured separately so it does not contaminate ingest or query
@@ -108,6 +109,7 @@ All settings have local defaults; override with environment variables.
 | `PERF_CONCURRENCY` | `8` | Scan partitions and ANN client concurrency |
 | `PERF_MUTATION_BUCKET` | `7` | First `id % 100` bucket for conditional mutation |
 | `PERF_MUTATION_WINDOWS` | `3` | Disjoint mutation windows; window `i` uses `bucket + 10 * i` |
+| `PERF_SINGLE_INSERTS` | `100` | Measured single-row inserts (plus 5 warmups) |
 | `PERF_LANCE_PREFIX` | `perf-eval/lance` | Prefix under the bucket for Lance datasets |
 
 ## Running
@@ -128,12 +130,14 @@ target/release/indexlake-bench index my-run          # vector HNSW only
 target/release/indexlake-bench query-scalar my-run   # full scan + range scan
 target/release/indexlake-bench query-vector my-run
 target/release/indexlake-bench mutate-conditional my-run
+target/release/indexlake-bench insert-single my-run
 
 target/release/lance-bench ingest my-run
 target/release/lance-bench index my-run              # vector HNSW only
 target/release/lance-bench query-scalar my-run
 target/release/lance-bench query-vector my-run
 target/release/lance-bench mutate-conditional my-run
+target/release/lance-bench insert-single my-run
 ```
 
 `run_all.sh` writes logs and size snapshots to `results/<run-id>/`.
@@ -247,6 +251,33 @@ Caveats:
 - No secondary index is built on the mutation tables. Mutation latency includes
   predicate evaluation and commit, and excludes the verification queries.
 
+### Single-row insert
+
+Measured on 2026-10-28 in a separate single-insert-only run
+(`ins-20261028T091510Z`) with the current revision. A dedicated 1M-row table
+was seeded with the bulk path, then 100 rows were appended one at a time after
+5 excluded warmups. Times are per insert.
+
+| Engine | p50 (ms) | p95 (ms) | mean (ms) | min / max (ms) | Inserts/s at p50 |
+|---|---:|---:|---:|---:|---:|
+| IndexLake | 1.322 | 2.599 | 1.473 | 0.573 / 6.190 | 756 |
+| Lance | 15.133 | 19.991 | 15.766 | 8.800 / 49.073 | 66 |
+
+Post-run state:
+
+| Engine | S3 footprint | State |
+|---|---:|---|
+| IndexLake | 274.5 MiB (10 objects) | 105 rows in PostgreSQL inline storage; data files unchanged |
+| Lance | 153.8 MiB (327 objects) | 115 fragments (10 seed + 105 one-row appends) |
+
+Lance is ~11.4x slower per single-row insert at p50. The cost is the per-append
+fragment write and manifest commit, not payload bytes: S3 bytes stay
+essentially flat while the object count rises to 327. IndexLake only commits a
+PostgreSQL inline row; its deferred dump is excluded.
+
+This measures the worst-case one-row-per-commit pattern. Applications that
+batch even a few rows per commit amortize the Lance commit cost.
+
 ### Storage and compression
 
 `stored/raw < 1` means compression.
@@ -316,6 +347,12 @@ BTree is built.
   new fragments and adds deletion vectors. IndexLake's deferred inline-row
   dump/merge is not included in the update latency, so compare timings and
   storage locations together, not S3 bytes alone.
+- **Single-row insert** seeds a dedicated 1M-row table with the bulk path, then
+  appends rows one at a time; five warmups are excluded. IndexLake stages each
+  row in PostgreSQL inline storage and the measured window stays below
+  `PERF_INLINE_LIMIT`, so no dump is triggered and deferred materialization is
+  excluded. Lance commits one new fragment/version per append, so its latency
+  and fragment count include the per-row S3 write and commit.
 
 ### Fairness caveats
 

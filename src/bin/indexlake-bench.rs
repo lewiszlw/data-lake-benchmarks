@@ -32,8 +32,9 @@ use indexlake_index_hnsw::{HnswIndexKind, HnswIndexParams, HnswSearchQuery};
 use indexlake_storage_s3::S3Storage;
 use opendal::services::S3Config;
 
-const USAGE: &str =
-    "<ingest-bulk|ingest-insert|index|query|query-scalar|query-vector|mutate-conditional> [run-id]";
+const USAGE: &str = "<ingest-bulk|ingest-insert|index|query|query-scalar|query-vector|mutate-conditional|insert-single> [run-id]";
+
+const INSERT_WARMUPS: usize = 5;
 
 async fn client(cfg: &BenchConfig) -> Client {
     let catalog = Arc::new(
@@ -862,6 +863,114 @@ async fn mutate_conditional(client: &Client, cfg: &BenchConfig, namespace: &str)
     mutate_conditional_delete(client, cfg, namespace, &buckets).await;
 }
 
+async fn insert_single(client: &Client, cfg: &BenchConfig, namespace: &str) {
+    assert!(
+        cfg.single_inserts > 0 && cfg.single_inserts + INSERT_WARMUPS < cfg.inline_limit,
+        "PERF_SINGLE_INSERTS + warmups must stay below PERF_INLINE_LIMIT so inserts remain inline"
+    );
+
+    let schema = scalar_schema();
+    let batches = scalar_batches(schema.clone(), cfg);
+    let (table, _) = create_and_bulk_insert(
+        client,
+        cfg,
+        namespace,
+        "scalar_insert_single",
+        schema.clone(),
+        batches,
+    )
+    .await;
+
+    emit(
+        "indexlake",
+        "insert",
+        &[
+            ("table", "scalar_insert_single".to_string()),
+            ("op", "prepare".to_string()),
+            ("rows", cfg.scalar_rows.to_string()),
+            (
+                "data_files",
+                table.data_file_count().await.unwrap().to_string(),
+            ),
+        ],
+    );
+
+    let mut next_id = cfg.scalar_rows;
+    for _ in 0..INSERT_WARMUPS {
+        let batch = scalar_batch(schema.clone(), next_id, 1);
+        table
+            .insert(TableInsertion::new(vec![batch]))
+            .await
+            .expect("warm-up single insert failed");
+        next_id += 1;
+    }
+    let measured_start = next_id;
+
+    let mut samples = Vec::with_capacity(cfg.single_inserts);
+    for _ in 0..cfg.single_inserts {
+        let batch = scalar_batch(schema.clone(), next_id, 1);
+        let start = Instant::now();
+        table
+            .insert(TableInsertion::new(vec![batch]))
+            .await
+            .expect("single insert failed");
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        next_id += 1;
+    }
+
+    assert_eq!(
+        table.inline_row_count().await.unwrap(),
+        INSERT_WARMUPS + cfg.single_inserts,
+        "single inserts must stay in inline storage for this benchmark"
+    );
+    for id in [
+        measured_start,
+        measured_start + cfg.single_inserts / 2,
+        next_id - 1,
+    ] {
+        assert_payload(&table, id as i32, &scalar_payload(id)).await;
+    }
+
+    let stats = stats(samples);
+    emit(
+        "indexlake",
+        "insert",
+        &[
+            ("table", "scalar_insert_single".to_string()),
+            ("op", "insert_single".to_string()),
+            ("n", cfg.single_inserts.to_string()),
+            ("warmups", INSERT_WARMUPS.to_string()),
+            ("p50_ms", format!("{:.3}", stats.p50)),
+            ("p95_ms", format!("{:.3}", stats.p95)),
+            ("mean_ms", format!("{:.3}", stats.mean)),
+            ("min_ms", format!("{:.3}", stats.min)),
+            ("max_ms", format!("{:.3}", stats.max)),
+            ("rows_per_s", format!("{:.1}", 1000.0 / stats.p50)),
+        ],
+    );
+
+    emit(
+        "indexlake",
+        "insert",
+        &[
+            ("table", "scalar_insert_single".to_string()),
+            ("op", "state".to_string()),
+            (
+                "prefix",
+                format!("{}/{}", table.namespace_id, table.table_id),
+            ),
+            (
+                "data_files",
+                table.data_file_count().await.unwrap().to_string(),
+            ),
+            (
+                "inline_rows",
+                table.inline_row_count().await.unwrap().to_string(),
+            ),
+        ],
+    );
+}
+
 async fn query_vector_phase(client: &Client, cfg: &BenchConfig, namespace: &str) {
     let table = client.load_table(namespace, "vector").await.unwrap();
 
@@ -1006,6 +1115,10 @@ async fn main() {
         "mutate-conditional" => {
             client.create_namespace(&namespace, true).await.unwrap();
             mutate_conditional(&client, &cfg, &namespace).await;
+        }
+        "insert-single" => {
+            client.create_namespace(&namespace, true).await.unwrap();
+            insert_single(&client, &cfg, &namespace).await;
         }
         other => panic!("unknown phase '{other}'\nusage: indexlake-bench {USAGE}"),
     }

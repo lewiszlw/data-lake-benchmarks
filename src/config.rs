@@ -54,6 +54,9 @@ pub struct BenchConfig {
     pub mutation_bucket: i32,
     pub mutation_windows: usize,
 
+    // Single-row insert shape.
+    pub single_inserts: usize,
+
     // Object store.
     pub s3_endpoint: String,
     pub s3_bucket: String,
@@ -92,6 +95,8 @@ impl BenchConfig {
 
             mutation_bucket: env_i32("PERF_MUTATION_BUCKET", 7),
             mutation_windows: env_usize("PERF_MUTATION_WINDOWS", 3),
+
+            single_inserts: env_usize("PERF_SINGLE_INSERTS", 100),
 
             s3_endpoint: env_string("S3_ENDPOINT", "http://127.0.0.1:9000"),
             s3_bucket: env_string("S3_BUCKET", "indexlake"),

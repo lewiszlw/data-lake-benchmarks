@@ -29,7 +29,10 @@ use lance_index::vector::ivf::IvfBuildParams;
 use lance_index::IndexType;
 use lance_linalg::distance::DistanceType;
 
-const USAGE: &str = "<ingest|index|query|query-scalar|query-vector|mutate-conditional> [run-id]";
+const USAGE: &str =
+    "<ingest|index|query|query-scalar|query-vector|mutate-conditional|insert-single> [run-id]";
+
+const INSERT_WARMUPS: usize = 5;
 
 fn storage_options(cfg: &BenchConfig) -> HashMap<String, String> {
     [
@@ -208,6 +211,15 @@ async fn ingest_scalar(cfg: &BenchConfig, run_id: &str) {
             ),
         ],
     );
+}
+
+async fn write_scalar_seed(cfg: &BenchConfig, run_id: &str, name: &str) -> Dataset {
+    let schema = scalar_schema();
+    let batches: Vec<RecordBatch> = (0..cfg.scalar_rows / cfg.scalar_batch)
+        .map(|i| scalar_batch(schema.clone(), i * cfg.scalar_batch, cfg.scalar_batch))
+        .collect();
+    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+    write_dataset(cfg, &cfg.lance_dataset_uri(run_id, name), reader).await
 }
 
 async fn write_mutation_scalar(cfg: &BenchConfig, run_id: &str, name: &str) -> Dataset {
@@ -633,6 +645,103 @@ async fn mutate_conditional(cfg: &BenchConfig, run_id: &str) {
     mutate_conditional_delete(cfg, run_id, &buckets).await;
 }
 
+async fn insert_single(cfg: &BenchConfig, run_id: &str) {
+    assert!(
+        cfg.single_inserts > 0,
+        "PERF_SINGLE_INSERTS must be greater than zero"
+    );
+
+    let mut dataset = write_scalar_seed(cfg, run_id, "scalar_insert_single").await;
+    let schema = scalar_schema();
+    let append_params = WriteParams {
+        store_params: Some(store_params(cfg)),
+        ..Default::default()
+    };
+
+    emit(
+        "lance",
+        "insert",
+        &[
+            ("table", "scalar_insert_single".to_string()),
+            ("op", "prepare".to_string()),
+            ("rows", cfg.scalar_rows.to_string()),
+            ("fragments", dataset.get_fragments().len().to_string()),
+        ],
+    );
+
+    let mut next_id = cfg.scalar_rows;
+    for _ in 0..INSERT_WARMUPS {
+        let batch = scalar_batch(schema.clone(), next_id, 1);
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema.clone());
+        dataset
+            .append(reader, Some(append_params.clone()))
+            .await
+            .expect("warm-up single insert failed");
+        next_id += 1;
+    }
+    let measured_start = next_id;
+
+    let mut samples = Vec::with_capacity(cfg.single_inserts);
+    for _ in 0..cfg.single_inserts {
+        let batch = scalar_batch(schema.clone(), next_id, 1);
+        let reader = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema.clone());
+        let start = Instant::now();
+        dataset
+            .append(reader, Some(append_params.clone()))
+            .await
+            .expect("single insert failed");
+        samples.push(start.elapsed().as_secs_f64() * 1000.0);
+        next_id += 1;
+    }
+
+    assert_eq!(
+        dataset.count_rows(None).await.unwrap(),
+        cfg.scalar_rows + INSERT_WARMUPS + cfg.single_inserts,
+        "single inserts did not all become visible"
+    );
+    for id in [
+        measured_start,
+        measured_start + cfg.single_inserts / 2,
+        next_id - 1,
+    ] {
+        let actual = read_payload(&dataset, id as i32).await;
+        assert_eq!(
+            actual.as_deref(),
+            Some(scalar_payload(id).as_str()),
+            "payload mismatch for id={id}"
+        );
+    }
+
+    let stats = stats(samples);
+    emit(
+        "lance",
+        "insert",
+        &[
+            ("table", "scalar_insert_single".to_string()),
+            ("op", "insert_single".to_string()),
+            ("n", cfg.single_inserts.to_string()),
+            ("warmups", INSERT_WARMUPS.to_string()),
+            ("p50_ms", format!("{:.3}", stats.p50)),
+            ("p95_ms", format!("{:.3}", stats.p95)),
+            ("mean_ms", format!("{:.3}", stats.mean)),
+            ("min_ms", format!("{:.3}", stats.min)),
+            ("max_ms", format!("{:.3}", stats.max)),
+            ("rows_per_s", format!("{:.1}", 1000.0 / stats.p50)),
+        ],
+    );
+
+    emit(
+        "lance",
+        "insert",
+        &[
+            ("table", "scalar_insert_single".to_string()),
+            ("op", "state".to_string()),
+            ("uri", cfg.lance_dataset_uri(run_id, "scalar_insert_single")),
+            ("fragments", dataset.get_fragments().len().to_string()),
+        ],
+    );
+}
+
 async fn query_vector_phase(cfg: &BenchConfig, run_id: &str) {
     let dataset = open_dataset(cfg, &cfg.lance_dataset_uri(run_id, "vector")).await;
 
@@ -751,6 +860,7 @@ async fn main() {
         "query-scalar" => query_scalar(&cfg, &cli.run_id).await,
         "query-vector" => query_vector_phase(&cfg, &cli.run_id).await,
         "mutate-conditional" => mutate_conditional(&cfg, &cli.run_id).await,
+        "insert-single" => insert_single(&cfg, &cli.run_id).await,
         other => panic!("unknown phase '{other}'\nusage: lance-bench {USAGE}"),
     }
 }
