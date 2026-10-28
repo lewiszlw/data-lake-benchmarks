@@ -1,0 +1,19 @@
+[package]
+name = "lance-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bench-core.workspace = true
+env_logger.workspace = true
+futures.workspace = true
+tokio.workspace = true
+
+arrow-array = "58"
+arrow-schema = "58"
+
+lance.workspace = true
+lance-index.workspace = true
+lance-linalg.workspace = true

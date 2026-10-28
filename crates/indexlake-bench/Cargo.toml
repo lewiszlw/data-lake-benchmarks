@@ -1,0 +1,21 @@
+[package]
+name = "indexlake-bench"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+publish = false
+
+[dependencies]
+bench-core.workspace = true
+env_logger.workspace = true
+futures.workspace = true
+tokio.workspace = true
+
+arrow = "59"
+opendal = "0.57"
+
+indexlake.workspace = true
+indexlake-catalog-postgres.workspace = true
+indexlake-index-btree.workspace = true
+indexlake-index-hnsw.workspace = true
+indexlake-storage-s3.workspace = true
