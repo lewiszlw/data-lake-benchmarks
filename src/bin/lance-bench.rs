@@ -15,8 +15,8 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use data_lake_benchmarks::{
     emit, ground_truth, mib_per_second, mutation_bucket, mutation_bucket_rows,
     mutation_first_row_outside_bucket, mutation_payload, mutation_sample_ids,
-    mutation_window_buckets, parse_cli, query_vector, rows_per_second, scalar_blob, scalar_payload,
-    scalar_raw_bytes, splitmix64, stats, vector_raw_bytes, BenchConfig, QUERY_SEED,
+    mutation_window_buckets, parse_cli, query_vector, range_start, rows_per_second, scalar_blob,
+    scalar_payload, scalar_raw_bytes, stats, vector_raw_bytes, BenchConfig,
 };
 use futures::TryStreamExt;
 use lance::dataset::builder::DatasetBuilder;
@@ -312,6 +312,25 @@ async fn point_query(dataset: &Dataset, id: i32) -> (std::time::Duration, usize)
     (start.elapsed(), rows)
 }
 
+async fn range_query(
+    dataset: &Dataset,
+    range_start: i32,
+    range_end: i32,
+) -> (std::time::Duration, usize) {
+    let start = Instant::now();
+    let mut scanner = dataset.scan();
+    scanner
+        .filter(&format!("id >= {range_start} AND id < {range_end}"))
+        .unwrap();
+    scanner.project(&["id"]).unwrap();
+    let mut stream = scanner.try_into_stream().await.unwrap();
+    let mut rows = 0usize;
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        rows += batch.num_rows();
+    }
+    (start.elapsed(), rows)
+}
+
 async fn vector_search(
     dataset: &Dataset,
     cfg: &BenchConfig,
@@ -373,15 +392,26 @@ async fn query_scalar(cfg: &BenchConfig, run_id: &str) {
         ],
     );
 
-    for id in 0..20 {
-        let (_, rows) = point_query(&dataset, id).await;
-        assert_eq!(rows, 1, "point query miss for id={id}");
+    assert!(
+        cfg.range_rows > 0 && cfg.range_rows <= cfg.scalar_rows,
+        "PERF_RANGE_ROWS must be in 1..=PERF_SCALAR_ROWS"
+    );
+    for sample in 0..20 {
+        let start = range_start(cfg.scalar_rows, cfg.range_rows, sample) as i32;
+        let (_, rows) = range_query(&dataset, start, start + cfg.range_rows as i32).await;
+        assert_eq!(
+            rows, cfg.range_rows,
+            "range warm-up returned unexpected rows for start={start}"
+        );
     }
-    let mut samples = Vec::with_capacity(cfg.point_queries);
-    for i in 0..cfg.point_queries {
-        let id = (splitmix64(QUERY_SEED ^ i as u64) % cfg.scalar_rows as u64) as i32;
-        let (elapsed, rows) = point_query(&dataset, id).await;
-        assert_eq!(rows, 1, "point query miss for id={id}");
+    let mut samples = Vec::with_capacity(cfg.range_queries);
+    for sample in 0..cfg.range_queries {
+        let start = range_start(cfg.scalar_rows, cfg.range_rows, sample) as i32;
+        let (elapsed, rows) = range_query(&dataset, start, start + cfg.range_rows as i32).await;
+        assert_eq!(
+            rows, cfg.range_rows,
+            "range scan returned unexpected rows for start={start}"
+        );
         samples.push(elapsed.as_secs_f64() * 1000.0);
     }
     let stats = stats(samples);
@@ -390,13 +420,23 @@ async fn query_scalar(cfg: &BenchConfig, run_id: &str) {
         "query",
         &[
             ("table", "scalar".to_string()),
-            ("op", "point".to_string()),
+            ("op", "range_scan".to_string()),
+            ("range_rows", cfg.range_rows.to_string()),
+            (
+                "selectivity",
+                format!("{:.4}", cfg.range_rows as f64 / cfg.scalar_rows as f64),
+            ),
             ("p50_ms", format!("{:.3}", stats.p50)),
             ("p95_ms", format!("{:.3}", stats.p95)),
             ("mean_ms", format!("{:.3}", stats.mean)),
             ("min_ms", format!("{:.3}", stats.min)),
             ("max_ms", format!("{:.3}", stats.max)),
-            ("n", cfg.point_queries.to_string()),
+            ("n", cfg.range_queries.to_string()),
+            ("rows_per_query", cfg.range_rows.to_string()),
+            (
+                "rows_per_s",
+                format!("{:.0}", cfg.range_rows as f64 / (stats.p50 / 1000.0)),
+            ),
         ],
     );
 }

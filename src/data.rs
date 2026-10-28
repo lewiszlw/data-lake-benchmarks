@@ -48,6 +48,19 @@ pub fn query_vector(query: usize, dim: usize) -> Vec<f32> {
         .collect()
 }
 
+/// Deterministic start id of a contiguous range scan.
+///
+/// Starts are spread across the whole id domain so a range usually crosses a
+/// row-group boundary instead of always landing on the same aligned block.
+pub fn range_start(rows: usize, range_rows: usize, sample: usize) -> usize {
+    assert!(
+        range_rows > 0 && range_rows <= rows,
+        "range_rows must be in 1..=rows"
+    );
+    let span = rows - range_rows + 1;
+    (splitmix64(QUERY_SEED ^ sample as u64) % span as u64) as usize
+}
+
 /// A compressible text value of exactly [`SCALAR_PAYLOAD_LEN`] bytes.
 ///
 /// The row prefix keeps values unique; the repeated sentence is what
@@ -260,6 +273,20 @@ mod tests {
         let unique: std::collections::HashSet<_> =
             mutation_window_buckets(0, 10).into_iter().collect();
         assert_eq!(unique.len(), 10);
+    }
+
+    #[test]
+    fn range_starts_stay_in_bounds() {
+        let rows = 1_000_000;
+        let range_rows = 10_000;
+        assert_eq!(range_start(rows, rows, 0), 0);
+        let starts: Vec<usize> = (0..100)
+            .map(|sample| range_start(rows, range_rows, sample))
+            .collect();
+        assert!(starts.iter().all(|start| start + range_rows <= rows));
+        assert_eq!(range_start(rows, range_rows, 7), starts[7]);
+        let unique: std::collections::HashSet<_> = starts.into_iter().collect();
+        assert!(unique.len() > 90);
     }
 
     #[test]

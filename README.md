@@ -10,7 +10,7 @@ Both engines are consumed directly from git and pinned to revisions that use
 |---|---|
 | Bulk ingest | 1M scalar rows and 100k × 1024-d vectors, no indexes |
 | Full scan | Read every scalar column and count rows |
-| Point lookup | Equality filter on a unique `Int32` key, **no secondary index** |
+| Range scan | Contiguous `id ∈ [start, start + 10k)` over 1M rows, **no secondary index** |
 | Vector search | Top-10 ANN over 100k vectors with HNSW (L2) |
 | Conditional update | `bucket = id % 100` matches 1% of scalar rows; set `payload` to a fixed 128-byte value |
 | Conditional delete | `bucket = id % 100` matches 1% of scalar rows |
@@ -101,7 +101,8 @@ All settings have local defaults; override with environment variables.
 | `PERF_K` | `10` | ANN results |
 | `PERF_EF_SEARCH` | `256` | HNSW search beam |
 | `PERF_EF_CONSTRUCTION` | `400` | HNSW construction beam |
-| `PERF_POINT_QUERIES` | `200` | Point-query latency samples |
+| `PERF_RANGE_QUERIES` | `200` | Range-scan latency samples |
+| `PERF_RANGE_ROWS` | `10000` | Rows returned by each range scan |
 | `PERF_ANN_QUERIES` | `100` | ANN latency samples |
 | `PERF_RECALL_QUERIES` | `20` | Queries used for recall@10 |
 | `PERF_CONCURRENCY` | `8` | Scan partitions and ANN client concurrency |
@@ -124,7 +125,7 @@ RUN_NATIVE_INSERT=1 scripts/run_all.sh my-run
 target/release/indexlake-bench ingest-bulk my-run
 target/release/indexlake-bench ingest-insert my-run
 target/release/indexlake-bench index my-run          # vector HNSW only
-target/release/indexlake-bench query-scalar my-run   # scan + point lookup
+target/release/indexlake-bench query-scalar my-run   # full scan + range scan
 target/release/indexlake-bench query-vector my-run
 target/release/indexlake-bench mutate-conditional my-run
 
@@ -148,7 +149,9 @@ python3 scripts/s3_size.py size perf-eval/lance/<run-id>  # Lance
 
 ## Results
 
-Measured on 2026-10-28.
+Measured on 2026-10-28 with the previous point-lookup suite. The current suite
+measures a range scan instead; rerun `scripts/run_all.sh` to refresh the query
+numbers below.
 
 | Item | Value |
 |---|---|
@@ -164,7 +167,7 @@ Workload:
 
 - Scalar: 1,000,000 rows (`id Int32`, 128-byte compressible text, 128-byte random binary), raw logical size 248.0 MiB.
 - Vector: 100,000 × 1024-d `f32`, raw logical size 391.0 MiB.
-- Point lookup: equality on `id` with **no scalar index**.
+- Point lookup (previous revision): equality on `id` with **no scalar index**.
 - Vector index: HNSW L2, `ef_construction=400`, `ef_search=256`, `k=10`.
 
 ### Ingest (no indexes)
@@ -188,16 +191,17 @@ asynchronously, so it is 3x (scalar) to 4x (vector) slower than `bypass_insert`.
 |---|---:|---:|
 | Full scan, single stream | 1041.9 ms (960k rows/s) | 62.5 ms (16.0M rows/s) |
 | Full scan, 8 streams | 364.4 ms (2.74M rows/s) | — |
-| Point lookup, no index, p50 / p95 | 418.5 / 465.9 ms | 7.52 / 10.96 ms |
+| Point lookup (previous revision), no index, p50 / p95 | 418.5 / 465.9 ms | 7.52 / 10.96 ms |
 | ANN p50 / p95 | 939.0 / 980.1 ms | 9.65 / 10.29 ms |
 | ANN recall@10 (`ef=256`) | 0.820 | 0.345 |
 | ANN QPS, client concurrency 8 | 5.5 | 814.1 |
 
-Point queries are filter-only on both sides. Lance uses file/row-group
-statistics and cached metadata to prune to one row group, so a no-index point
-lookup is still ~7.5 ms. IndexLake performs a catalog round trip and re-opens
-Parquet metadata/row groups per query; without a BTree it drops from the
-previous indexed-path ~1.65 s to ~0.42 s, but remains ~56x slower than Lance.
+In that revision, point queries were filter-only on both sides. Lance used
+file/row-group statistics and cached metadata to prune to one row group, so a
+no-index point lookup was still ~7.5 ms. IndexLake performed a catalog round
+trip and re-opened Parquet metadata/row groups per query; without a BTree it
+dropped from the previous indexed-path ~1.65 s to ~0.42 s, but remained ~56x
+slower than Lance.
 
 For ANN, IndexLake's pinned `hnsw_rs` implementation reaches higher recall but
 is ~97x slower per query. Its latency is dominated by re-reading and
@@ -246,8 +250,11 @@ BTree is built.
   files and commits once, bypassing PostgreSQL inline staging. This is the fair
   counterpart to Lance's `Dataset::write`. `ingest-insert` measures the
   transactional path separately.
-- **Point lookup does not use a secondary index.** No BTree is created; the
-  query is a filter on `id`, letting each engine use only its scan/pruning path.
+- **Range scan does not use a secondary index.** No BTree is created; the
+  predicate is `id >= start AND id < start + PERF_RANGE_ROWS`, letting each
+  engine use only its scan/pruning path. Random starts usually cross a row-group
+  boundary, so a default 10k-row scan reads one or two row groups. Only `id` is
+  projected.
 - **No index maintenance** is included in ingest: tables are created without
   indexes, and the vector index is built in a separate phase.
 - **Queries are warm-cache**: warmups are excluded, then p50/p95 are reported.
