@@ -210,6 +210,43 @@ reconstructing the ~425 MB index from S3 on every query
 Read ANN latency together with recall: at `ef=256` the two implementations are
 not at the same operating point.
 
+### Conditional mutation
+
+Measured on 2026-10-28 in a separate mutation-only run
+(`mut-20261028T090658Z`) with the current revision. Each engine ingested two
+dedicated 1M-row tables, then applied three disjoint `bucket = id % 100`
+windows; every window affected exactly 10,000 rows (1%) and passed row-level
+verification. Times are per window in milliseconds.
+
+| Engine / operation | Windows (ms) | Median (ms) | Rows/s at median |
+|---|---:|---:|---:|
+| IndexLake conditional update | 574 / 650 / 659 | 650 | 15,385 |
+| IndexLake conditional delete | 429 / 416 / 373 | 416 | 24,038 |
+| Lance conditional update | 205 / 225 / 125 | 205 | 48,780 |
+| Lance conditional delete | 86 / 34 / 97 | 86 | 116,279 |
+
+Post-mutation storage state:
+
+| Engine / table | S3 footprint | State |
+|---|---:|---|
+| IndexLake update | 275.4 MiB (10 objects) | 30,000 rows in PostgreSQL inline storage; data files unchanged |
+| IndexLake delete | 275.4 MiB (10 objects) | row validity updated in the catalog; data files unchanged |
+| Lance update | 158.1 MiB (51 objects) | 13 fragments: 10 originals plus 3 rewritten row sets |
+| Lance delete | 154.2 MiB (48 objects) | 10 fragments carrying deletion vectors |
+
+Lance is ~3.2x faster on update and ~4.8x on delete by median, but the spread
+across three windows is wide; read the per-window values too.
+
+Caveats:
+
+- IndexLake update timings are not end-to-end: the 30,000 updated rows stay in
+  PostgreSQL inline storage and are not dumped/merged within the measurement.
+  Lance writes the matched rows as new S3 fragments immediately.
+- Windows run sequentially on one table, so later windows include the state
+  left by earlier ones.
+- No secondary index is built on the mutation tables. Mutation latency includes
+  predicate evaluation and commit, and excludes the verification queries.
+
 ### Storage and compression
 
 `stored/raw < 1` means compression.
