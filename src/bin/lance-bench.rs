@@ -13,12 +13,14 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use data_lake_benchmarks::{
-    emit, ground_truth, mib_per_second, parse_cli, query_vector, rows_per_second, scalar_blob,
-    scalar_payload, scalar_raw_bytes, splitmix64, stats, vector_raw_bytes, BenchConfig, QUERY_SEED,
+    emit, ground_truth, mib_per_second, mutation_bucket, mutation_bucket_rows,
+    mutation_first_row_outside_bucket, mutation_payload, mutation_sample_ids,
+    mutation_window_buckets, parse_cli, query_vector, rows_per_second, scalar_blob, scalar_payload,
+    scalar_raw_bytes, splitmix64, stats, vector_raw_bytes, BenchConfig, QUERY_SEED,
 };
 use futures::TryStreamExt;
 use lance::dataset::builder::DatasetBuilder;
-use lance::dataset::{Dataset, WriteMode, WriteParams};
+use lance::dataset::{Dataset, DeleteBuilder, UpdateBuilder, WriteMode, WriteParams};
 use lance::index::vector::VectorIndexParams;
 use lance::index::DatasetIndexExt;
 use lance::io::{ObjectStoreParams, StorageOptionsAccessor};
@@ -27,7 +29,7 @@ use lance_index::vector::ivf::IvfBuildParams;
 use lance_index::IndexType;
 use lance_linalg::distance::DistanceType;
 
-const USAGE: &str = "<ingest|index|query|query-scalar|query-vector> [run-id]";
+const USAGE: &str = "<ingest|index|query|query-scalar|query-vector|mutate-conditional> [run-id]";
 
 fn storage_options(cfg: &BenchConfig) -> HashMap<String, String> {
     [
@@ -74,6 +76,36 @@ fn scalar_batch(schema: SchemaRef, start: usize, rows: usize) -> RecordBatch {
             Arc::new(Int32Array::from(ids)) as ArrayRef,
             Arc::new(StringArray::from(payloads)) as ArrayRef,
             Arc::new(blobs.finish()) as ArrayRef,
+        ],
+    )
+    .unwrap()
+}
+
+fn mutation_scalar_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("payload", DataType::Utf8, false),
+        Field::new("blob", DataType::Binary, false),
+        Field::new("bucket", DataType::Int32, false),
+    ]))
+}
+
+fn mutation_scalar_batch(schema: SchemaRef, start: usize, rows: usize) -> RecordBatch {
+    let ids: Vec<i32> = (start..start + rows).map(|row| row as i32).collect();
+    let payloads: Vec<String> = (start..start + rows).map(scalar_payload).collect();
+    let buckets: Vec<i32> = (start..start + rows).map(mutation_bucket).collect();
+    let mut blobs =
+        BinaryBuilder::with_capacity(rows, rows * data_lake_benchmarks::SCALAR_BLOB_LEN);
+    for row in start..start + rows {
+        blobs.append_value(scalar_blob(row));
+    }
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int32Array::from(ids)) as ArrayRef,
+            Arc::new(StringArray::from(payloads)) as ArrayRef,
+            Arc::new(blobs.finish()) as ArrayRef,
+            Arc::new(Int32Array::from(buckets)) as ArrayRef,
         ],
     )
     .unwrap()
@@ -176,6 +208,15 @@ async fn ingest_scalar(cfg: &BenchConfig, run_id: &str) {
             ),
         ],
     );
+}
+
+async fn write_mutation_scalar(cfg: &BenchConfig, run_id: &str, name: &str) -> Dataset {
+    let schema = mutation_scalar_schema();
+    let batches: Vec<RecordBatch> = (0..cfg.scalar_rows / cfg.scalar_batch)
+        .map(|i| mutation_scalar_batch(schema.clone(), i * cfg.scalar_batch, cfg.scalar_batch))
+        .collect();
+    let reader = RecordBatchIterator::new(batches.into_iter().map(Ok), schema);
+    write_dataset(cfg, &cfg.lance_dataset_uri(run_id, name), reader).await
 }
 
 async fn ingest_vector(cfg: &BenchConfig, run_id: &str) {
@@ -360,6 +401,198 @@ async fn query_scalar(cfg: &BenchConfig, run_id: &str) {
     );
 }
 
+fn sql_literal(value: &str) -> String {
+    format!("'{}'", value.replace('\'', "''"))
+}
+
+async fn read_payload(dataset: &Dataset, id: i32) -> Option<String> {
+    let mut scanner = dataset.scan();
+    scanner.filter(&format!("id = {id}")).unwrap();
+    scanner.project(&["payload"]).unwrap();
+    let mut stream = scanner.try_into_stream().await.unwrap();
+    let mut value = None;
+    while let Some(batch) = stream.try_next().await.unwrap() {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let payloads = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("payload column must be Utf8");
+        value = Some(payloads.value(0).to_string());
+    }
+    value
+}
+
+async fn assert_payload(dataset: &Dataset, id: i32, expected: &str) {
+    let actual = read_payload(dataset, id).await;
+    assert_eq!(
+        actual.as_deref(),
+        Some(expected),
+        "payload mismatch for id={id}"
+    );
+}
+
+async fn mutate_conditional_update(cfg: &BenchConfig, run_id: &str, buckets: &[i32]) {
+    let mut dataset = Arc::new(write_mutation_scalar(cfg, run_id, "scalar_update_cond").await);
+
+    emit(
+        "lance",
+        "mutate",
+        &[
+            ("table", "scalar_update_cond".to_string()),
+            ("op", "prepare".to_string()),
+            ("fragments", dataset.get_fragments().len().to_string()),
+        ],
+    );
+
+    for (window, &bucket) in buckets.iter().enumerate() {
+        let expected = mutation_bucket_rows(cfg.scalar_rows, bucket);
+        assert!(expected > 0, "bucket {bucket} has no rows");
+        let updated = mutation_payload(bucket);
+
+        // Warm the metadata cache so the timed operation does not pay for the first open.
+        let warm_id = mutation_sample_ids(cfg.scalar_rows, bucket, 1)[0];
+        let (_, rows) = point_query(dataset.as_ref(), warm_id).await;
+        assert_eq!(rows, 1, "warm-up point query missed id={warm_id}");
+
+        let literal = sql_literal(&updated);
+        let start = Instant::now();
+        let result = UpdateBuilder::new(dataset.clone())
+            .update_where(&format!("bucket = {bucket}"))
+            .unwrap()
+            .set("payload", &literal)
+            .unwrap()
+            .build()
+            .unwrap()
+            .execute()
+            .await
+            .expect("conditional update failed");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            result.rows_updated, expected as u64,
+            "conditional update affected rows for bucket {bucket}"
+        );
+        dataset = result.new_dataset;
+
+        for id in mutation_sample_ids(cfg.scalar_rows, bucket, 8) {
+            assert_payload(dataset.as_ref(), id, &updated).await;
+        }
+        let outside = mutation_first_row_outside_bucket(cfg.scalar_rows, bucket);
+        assert_payload(dataset.as_ref(), outside as i32, &scalar_payload(outside)).await;
+
+        emit(
+            "lance",
+            "mutate",
+            &[
+                ("table", "scalar_update_cond".to_string()),
+                ("op", "update_conditional".to_string()),
+                ("window", window.to_string()),
+                ("bucket", bucket.to_string()),
+                ("rows_target", expected.to_string()),
+                ("rows_affected", result.rows_updated.to_string()),
+                ("elapsed_ms", elapsed.as_millis().to_string()),
+                (
+                    "rows_per_s",
+                    format!("{:.1}", rows_per_second(expected, elapsed)),
+                ),
+            ],
+        );
+    }
+
+    emit(
+        "lance",
+        "mutate",
+        &[
+            ("table", "scalar_update_cond".to_string()),
+            ("op", "state".to_string()),
+            ("uri", cfg.lance_dataset_uri(run_id, "scalar_update_cond")),
+            ("fragments", dataset.get_fragments().len().to_string()),
+        ],
+    );
+}
+
+async fn mutate_conditional_delete(cfg: &BenchConfig, run_id: &str, buckets: &[i32]) {
+    let mut dataset = Arc::new(write_mutation_scalar(cfg, run_id, "scalar_delete_cond").await);
+
+    emit(
+        "lance",
+        "mutate",
+        &[
+            ("table", "scalar_delete_cond".to_string()),
+            ("op", "prepare".to_string()),
+            ("fragments", dataset.get_fragments().len().to_string()),
+        ],
+    );
+
+    for (window, &bucket) in buckets.iter().enumerate() {
+        let expected = mutation_bucket_rows(cfg.scalar_rows, bucket);
+        assert!(expected > 0, "bucket {bucket} has no rows");
+
+        let warm_id = mutation_sample_ids(cfg.scalar_rows, bucket, 1)[0];
+        let (_, rows) = point_query(dataset.as_ref(), warm_id).await;
+        assert_eq!(rows, 1, "warm-up point query missed id={warm_id}");
+
+        let start = Instant::now();
+        let result = DeleteBuilder::new(dataset.clone(), format!("bucket = {bucket}"))
+            .execute()
+            .await
+            .expect("conditional delete failed");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            result.num_deleted_rows, expected as u64,
+            "conditional delete affected rows for bucket {bucket}"
+        );
+        dataset = result.new_dataset;
+
+        for id in mutation_sample_ids(cfg.scalar_rows, bucket, 8) {
+            let (_, rows) = point_query(dataset.as_ref(), id).await;
+            assert_eq!(rows, 0, "deleted row id={id} is still visible");
+        }
+        let outside = mutation_first_row_outside_bucket(cfg.scalar_rows, bucket);
+        let (_, rows) = point_query(dataset.as_ref(), outside as i32).await;
+        assert_eq!(rows, 1, "non-target row id={outside} was deleted");
+
+        emit(
+            "lance",
+            "mutate",
+            &[
+                ("table", "scalar_delete_cond".to_string()),
+                ("op", "delete_conditional".to_string()),
+                ("window", window.to_string()),
+                ("bucket", bucket.to_string()),
+                ("rows_target", expected.to_string()),
+                ("rows_affected", result.num_deleted_rows.to_string()),
+                ("elapsed_ms", elapsed.as_millis().to_string()),
+                (
+                    "rows_per_s",
+                    format!("{:.1}", rows_per_second(expected, elapsed)),
+                ),
+            ],
+        );
+    }
+
+    emit(
+        "lance",
+        "mutate",
+        &[
+            ("table", "scalar_delete_cond".to_string()),
+            ("op", "state".to_string()),
+            ("uri", cfg.lance_dataset_uri(run_id, "scalar_delete_cond")),
+            ("fragments", dataset.get_fragments().len().to_string()),
+        ],
+    );
+}
+
+async fn mutate_conditional(cfg: &BenchConfig, run_id: &str) {
+    let buckets = mutation_window_buckets(cfg.mutation_bucket, cfg.mutation_windows);
+    mutate_conditional_update(cfg, run_id, &buckets).await;
+    mutate_conditional_delete(cfg, run_id, &buckets).await;
+}
+
 async fn query_vector_phase(cfg: &BenchConfig, run_id: &str) {
     let dataset = open_dataset(cfg, &cfg.lance_dataset_uri(run_id, "vector")).await;
 
@@ -477,6 +710,7 @@ async fn main() {
         }
         "query-scalar" => query_scalar(&cfg, &cli.run_id).await,
         "query-vector" => query_vector_phase(&cfg, &cli.run_id).await,
+        "mutate-conditional" => mutate_conditional(&cfg, &cli.run_id).await,
         other => panic!("unknown phase '{other}'\nusage: lance-bench {USAGE}"),
     }
 }

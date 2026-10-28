@@ -77,4 +77,23 @@ echo "== queries =="
 "$IL" query-vector "$RUN_ID" | tee "$OUT/indexlake-query-vector.log"
 "$LA" query-vector "$RUN_ID" | tee "$OUT/lance-query-vector.log"
 
+# Mutations run last and use dedicated tables, so they never contaminate the
+# query datasets above.
+echo "== conditional mutations =="
+"$IL" mutate-conditional "$RUN_ID" | tee "$OUT/indexlake-mutate-conditional.log"
+"$LA" mutate-conditional "$RUN_ID" | tee "$OUT/lance-mutate-conditional.log"
+
+IL_UPDATE_PREFIX="$(sed -n 's/.*table=scalar_update_cond .*prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-mutate-conditional.log" | tail -1)"
+IL_DELETE_PREFIX="$(sed -n 's/.*table=scalar_delete_cond .*prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-mutate-conditional.log" | tail -1)"
+: "${IL_UPDATE_PREFIX:?failed to parse indexlake conditional-update prefix}"
+: "${IL_DELETE_PREFIX:?failed to parse indexlake conditional-delete prefix}"
+
+{
+    echo "stage=after_mutation"
+    echo -n "indexlake_update_cond "; python3 "$S3" size "$IL_UPDATE_PREFIX"
+    echo -n "indexlake_delete_cond "; python3 "$S3" size "$IL_DELETE_PREFIX"
+    echo -n "lance_update_cond    "; python3 "$S3" size "$LA_PREFIX/scalar_update_cond"
+    echo -n "lance_delete_cond    "; python3 "$S3" size "$LA_PREFIX/scalar_delete_cond"
+} | tee "$OUT/sizes-after-mutation.txt"
+
 echo "done: $OUT"

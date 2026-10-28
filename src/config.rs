@@ -22,6 +22,13 @@ fn env_u16(key: &str, default: u16) -> u16 {
         .unwrap_or(default)
 }
 
+fn env_i32(key: &str, default: i32) -> i32 {
+    env::var(key)
+        .ok()
+        .and_then(|value| value.parse().ok())
+        .unwrap_or(default)
+}
+
 #[derive(Debug, Clone)]
 pub struct BenchConfig {
     // Workload shape.
@@ -41,6 +48,10 @@ pub struct BenchConfig {
     pub ann_queries: usize,
     pub recall_queries: usize,
     pub concurrency: usize,
+
+    // Conditional mutation shape.
+    pub mutation_bucket: i32,
+    pub mutation_windows: usize,
 
     // Object store.
     pub s3_endpoint: String,
@@ -76,6 +87,9 @@ impl BenchConfig {
             ann_queries: env_usize("PERF_ANN_QUERIES", 100),
             recall_queries: env_usize("PERF_RECALL_QUERIES", 20),
             concurrency: env_usize("PERF_CONCURRENCY", 8),
+
+            mutation_bucket: env_i32("PERF_MUTATION_BUCKET", 7),
+            mutation_windows: env_usize("PERF_MUTATION_WINDOWS", 3),
 
             s3_endpoint: env_string("S3_ENDPOINT", "http://127.0.0.1:9000"),
             s3_bucket: env_string("S3_BUCKET", "indexlake"),

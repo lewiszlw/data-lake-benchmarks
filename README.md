@@ -12,6 +12,8 @@ Both engines are consumed directly from git and pinned to revisions that use
 | Full scan | Read every scalar column and count rows |
 | Point lookup | Equality filter on a unique `Int32` key, **no secondary index** |
 | Vector search | Top-10 ANN over 100k vectors with HNSW (L2) |
+| Conditional update | `bucket = id % 100` matches 1% of scalar rows; set `payload` to a fixed 128-byte value |
+| Conditional delete | `bucket = id % 100` matches 1% of scalar rows |
 
 Storage bytes and compression ratios are measured from S3 object sizes. Index
 build time is measured separately so it does not contaminate ingest or query
@@ -103,6 +105,8 @@ All settings have local defaults; override with environment variables.
 | `PERF_ANN_QUERIES` | `100` | ANN latency samples |
 | `PERF_RECALL_QUERIES` | `20` | Queries used for recall@10 |
 | `PERF_CONCURRENCY` | `8` | Scan partitions and ANN client concurrency |
+| `PERF_MUTATION_BUCKET` | `7` | First `id % 100` bucket for conditional mutation |
+| `PERF_MUTATION_WINDOWS` | `3` | Disjoint mutation windows; window `i` uses `bucket + 10 * i` |
 | `PERF_LANCE_PREFIX` | `perf-eval/lance` | Prefix under the bucket for Lance datasets |
 
 ## Running
@@ -122,11 +126,13 @@ target/release/indexlake-bench ingest-insert my-run
 target/release/indexlake-bench index my-run          # vector HNSW only
 target/release/indexlake-bench query-scalar my-run   # scan + point lookup
 target/release/indexlake-bench query-vector my-run
+target/release/indexlake-bench mutate-conditional my-run
 
 target/release/lance-bench ingest my-run
 target/release/lance-bench index my-run              # vector HNSW only
 target/release/lance-bench query-scalar my-run
 target/release/lance-bench query-vector my-run
+target/release/lance-bench mutate-conditional my-run
 ```
 
 `run_all.sh` writes logs and size snapshots to `results/<run-id>/`.
@@ -252,6 +258,20 @@ BTree is built.
   bytes per vector.
 - **ANN ground truth** is an exact squared-L2 scan over the same generated
   vectors. Report latency together with recall.
+- **Conditional mutation** uses dedicated tables created by the
+  `mutate-conditional` phase; the query datasets are never modified. The scalar
+  schema adds `bucket Int32 = id % 100`, so a `bucket = N` predicate cannot be
+  pruned by Parquet/Lance min/max statistics. Every window targets a different
+  bucket (`7, 17, 27` by default), reports the affected row count, and verifies
+  both target and non-target rows. Mutation latency includes predicate
+  evaluation and commit; it excludes verification queries. Windows run
+  sequentially on the same table, so later windows include the state left by
+  earlier ones; the log reports every window instead of only a median.
+- **Where updates land matters.** IndexLake writes updated rows to PostgreSQL
+  inline storage and invalidates the old rows; Lance writes the matched rows as
+  new fragments and adds deletion vectors. IndexLake's deferred inline-row
+  dump/merge is not included in the update latency, so compare timings and
+  storage locations together, not S3 bytes alone.
 
 ### Fairness caveats
 

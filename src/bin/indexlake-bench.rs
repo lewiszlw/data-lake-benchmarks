@@ -12,8 +12,10 @@ use arrow::array::{
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use data_lake_benchmarks::{
-    emit, ground_truth, mib_per_second, parse_cli, query_vector, rows_per_second, scalar_blob,
-    scalar_payload, scalar_raw_bytes, splitmix64, stats, vector_raw_bytes, BenchConfig, QUERY_SEED,
+    emit, ground_truth, mib_per_second, mutation_bucket, mutation_bucket_rows,
+    mutation_first_row_outside_bucket, mutation_payload, mutation_sample_ids,
+    mutation_window_buckets, parse_cli, query_vector, rows_per_second, scalar_blob, scalar_payload,
+    scalar_raw_bytes, splitmix64, stats, vector_raw_bytes, BenchConfig, QUERY_SEED,
 };
 use futures::StreamExt;
 use indexlake::catalog::Scalar;
@@ -22,7 +24,7 @@ use indexlake::index::IndexKind;
 use indexlake::storage::DataFileFormat;
 use indexlake::table::{
     IndexCreation, Table, TableConfig, TableCreation, TableInsertion, TableScan,
-    TableScanPartition, TableSearch,
+    TableScanPartition, TableSearch, TableUpdate,
 };
 use indexlake::{Client, ILError};
 use indexlake_catalog_postgres::PostgresCatalogBuilder;
@@ -30,7 +32,8 @@ use indexlake_index_hnsw::{HnswIndexKind, HnswIndexParams, HnswSearchQuery};
 use indexlake_storage_s3::S3Storage;
 use opendal::services::S3Config;
 
-const USAGE: &str = "<ingest-bulk|ingest-insert|index|query|query-scalar|query-vector> [run-id]";
+const USAGE: &str =
+    "<ingest-bulk|ingest-insert|index|query|query-scalar|query-vector|mutate-conditional> [run-id]";
 
 async fn client(cfg: &BenchConfig) -> Client {
     let catalog = Arc::new(
@@ -84,6 +87,36 @@ fn scalar_batch(schema: SchemaRef, start: usize, rows: usize) -> RecordBatch {
             Arc::new(Int32Array::from(ids)) as ArrayRef,
             Arc::new(StringArray::from(payloads)) as ArrayRef,
             Arc::new(blobs.finish()) as ArrayRef,
+        ],
+    )
+    .unwrap()
+}
+
+fn mutation_scalar_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("id", DataType::Int32, false),
+        Field::new("payload", DataType::Utf8, false),
+        Field::new("blob", DataType::Binary, false),
+        Field::new("bucket", DataType::Int32, false),
+    ]))
+}
+
+fn mutation_scalar_batch(schema: SchemaRef, start: usize, rows: usize) -> RecordBatch {
+    let ids: Vec<i32> = (start..start + rows).map(|row| row as i32).collect();
+    let payloads: Vec<String> = (start..start + rows).map(scalar_payload).collect();
+    let buckets: Vec<i32> = (start..start + rows).map(mutation_bucket).collect();
+    let mut blobs =
+        BinaryBuilder::with_capacity(rows, rows * data_lake_benchmarks::SCALAR_BLOB_LEN);
+    for row in start..start + rows {
+        blobs.append_value(scalar_blob(row));
+    }
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int32Array::from(ids)) as ArrayRef,
+            Arc::new(StringArray::from(payloads)) as ArrayRef,
+            Arc::new(blobs.finish()) as ArrayRef,
+            Arc::new(Int32Array::from(buckets)) as ArrayRef,
         ],
     )
     .unwrap()
@@ -177,12 +210,27 @@ async fn wait_for_files(table: &Table, expected: usize, timeout: Duration) -> Du
     }
 }
 
-async fn ingest_bulk_scalar(client: &Client, cfg: &BenchConfig, namespace: &str) -> Table {
-    let schema = scalar_schema();
-    let table = create_table(client, cfg, namespace, "scalar", schema.clone()).await;
-    let batches: Vec<RecordBatch> = (0..cfg.scalar_rows / cfg.scalar_batch)
+fn scalar_batches(schema: SchemaRef, cfg: &BenchConfig) -> Vec<RecordBatch> {
+    (0..cfg.scalar_rows / cfg.scalar_batch)
         .map(|i| scalar_batch(schema.clone(), i * cfg.scalar_batch, cfg.scalar_batch))
-        .collect();
+        .collect()
+}
+
+fn mutation_scalar_batches(schema: SchemaRef, cfg: &BenchConfig) -> Vec<RecordBatch> {
+    (0..cfg.scalar_rows / cfg.scalar_batch)
+        .map(|i| mutation_scalar_batch(schema.clone(), i * cfg.scalar_batch, cfg.scalar_batch))
+        .collect()
+}
+
+async fn create_and_bulk_insert(
+    client: &Client,
+    cfg: &BenchConfig,
+    namespace: &str,
+    name: &str,
+    schema: SchemaRef,
+    batches: Vec<RecordBatch>,
+) -> (Table, Duration) {
+    let table = create_table(client, cfg, namespace, name, schema).await;
     let stream = futures::stream::iter(batches.into_iter().map(Ok::<_, ILError>)).boxed();
 
     let start = Instant::now();
@@ -196,6 +244,14 @@ async fn ingest_bulk_scalar(client: &Client, cfg: &BenchConfig, namespace: &str)
         table.data_file_count().await.unwrap(),
         cfg.expected_files(cfg.scalar_rows)
     );
+    (table, elapsed)
+}
+
+async fn ingest_bulk_scalar(client: &Client, cfg: &BenchConfig, namespace: &str) -> Table {
+    let schema = scalar_schema();
+    let batches = scalar_batches(schema.clone(), cfg);
+    let (table, elapsed) =
+        create_and_bulk_insert(client, cfg, namespace, "scalar", schema, batches).await;
 
     emit(
         "indexlake",
@@ -524,6 +580,251 @@ async fn query_scalar(client: &Client, cfg: &BenchConfig, namespace: &str) {
     );
 }
 
+async fn read_payload(table: &Table, id: i32) -> Option<String> {
+    // IndexLake puts the internal row id at schema index 0, so user columns
+    // start at 1: id=1, payload=2, blob=3, bucket=4.
+    let scan = TableScan::default()
+        .with_filters(vec![col("id").eq(lit(Scalar::Int32(Some(id))))])
+        .with_projection(Some(vec![2]))
+        .with_batch_size(16);
+    let mut stream = table.scan(scan).await.unwrap();
+    let mut value = None;
+    while let Some(batch) = stream.next().await {
+        let batch = batch.unwrap();
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let payloads = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("payload column must be Utf8");
+        value = Some(payloads.value(0).to_string());
+    }
+    value
+}
+
+async fn assert_payload(table: &Table, id: i32, expected: &str) {
+    let actual = read_payload(table, id).await;
+    assert_eq!(
+        actual.as_deref(),
+        Some(expected),
+        "payload mismatch for id={id}"
+    );
+}
+
+async fn mutate_conditional_update(
+    client: &Client,
+    cfg: &BenchConfig,
+    namespace: &str,
+    buckets: &[i32],
+) {
+    let schema = mutation_scalar_schema();
+    let batches = mutation_scalar_batches(schema.clone(), cfg);
+    let (table, _) = create_and_bulk_insert(
+        client,
+        cfg,
+        namespace,
+        "scalar_update_cond",
+        schema,
+        batches,
+    )
+    .await;
+
+    emit(
+        "indexlake",
+        "mutate",
+        &[
+            ("table", "scalar_update_cond".to_string()),
+            ("op", "prepare".to_string()),
+            (
+                "data_files",
+                table.data_file_count().await.unwrap().to_string(),
+            ),
+        ],
+    );
+
+    for (window, &bucket) in buckets.iter().enumerate() {
+        let expected = mutation_bucket_rows(cfg.scalar_rows, bucket);
+        assert!(expected > 0, "bucket {bucket} has no rows");
+        let updated = mutation_payload(bucket);
+
+        // Warm the metadata cache so the timed operation does not pay for the first open.
+        let warm_id = mutation_sample_ids(cfg.scalar_rows, bucket, 1)[0];
+        let (_, rows) = run_point_query(&table, warm_id).await;
+        assert_eq!(rows, 1, "warm-up point query missed id={warm_id}");
+
+        let update = TableUpdate {
+            set_map: HashMap::from([(
+                "payload".to_string(),
+                lit(Scalar::Utf8(Some(updated.clone()))),
+            )]),
+            condition: col("bucket").eq(lit(bucket)),
+        };
+
+        let start = Instant::now();
+        let affected = table
+            .update(update)
+            .await
+            .expect("conditional update failed");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            affected, expected,
+            "conditional update affected rows for bucket {bucket}"
+        );
+        for id in mutation_sample_ids(cfg.scalar_rows, bucket, 8) {
+            assert_payload(&table, id, &updated).await;
+        }
+        let outside = mutation_first_row_outside_bucket(cfg.scalar_rows, bucket);
+        assert_payload(&table, outside as i32, &scalar_payload(outside)).await;
+
+        emit(
+            "indexlake",
+            "mutate",
+            &[
+                ("table", "scalar_update_cond".to_string()),
+                ("op", "update_conditional".to_string()),
+                ("window", window.to_string()),
+                ("bucket", bucket.to_string()),
+                ("rows_target", expected.to_string()),
+                ("rows_affected", affected.to_string()),
+                ("elapsed_ms", elapsed.as_millis().to_string()),
+                (
+                    "rows_per_s",
+                    format!("{:.1}", rows_per_second(affected, elapsed)),
+                ),
+            ],
+        );
+    }
+
+    emit(
+        "indexlake",
+        "mutate",
+        &[
+            ("table", "scalar_update_cond".to_string()),
+            ("op", "state".to_string()),
+            (
+                "prefix",
+                format!("{}/{}", table.namespace_id, table.table_id),
+            ),
+            (
+                "data_files",
+                table.data_file_count().await.unwrap().to_string(),
+            ),
+            (
+                "inline_rows",
+                table.inline_row_count().await.unwrap().to_string(),
+            ),
+        ],
+    );
+}
+
+async fn mutate_conditional_delete(
+    client: &Client,
+    cfg: &BenchConfig,
+    namespace: &str,
+    buckets: &[i32],
+) {
+    let schema = mutation_scalar_schema();
+    let batches = mutation_scalar_batches(schema.clone(), cfg);
+    let (table, _) = create_and_bulk_insert(
+        client,
+        cfg,
+        namespace,
+        "scalar_delete_cond",
+        schema,
+        batches,
+    )
+    .await;
+
+    emit(
+        "indexlake",
+        "mutate",
+        &[
+            ("table", "scalar_delete_cond".to_string()),
+            ("op", "prepare".to_string()),
+            (
+                "data_files",
+                table.data_file_count().await.unwrap().to_string(),
+            ),
+        ],
+    );
+
+    for (window, &bucket) in buckets.iter().enumerate() {
+        let expected = mutation_bucket_rows(cfg.scalar_rows, bucket);
+        assert!(expected > 0, "bucket {bucket} has no rows");
+
+        let warm_id = mutation_sample_ids(cfg.scalar_rows, bucket, 1)[0];
+        let (_, rows) = run_point_query(&table, warm_id).await;
+        assert_eq!(rows, 1, "warm-up point query missed id={warm_id}");
+
+        let start = Instant::now();
+        let affected = table
+            .delete(col("bucket").eq(lit(bucket)))
+            .await
+            .expect("conditional delete failed");
+        let elapsed = start.elapsed();
+
+        assert_eq!(
+            affected, expected,
+            "conditional delete affected rows for bucket {bucket}"
+        );
+        for id in mutation_sample_ids(cfg.scalar_rows, bucket, 8) {
+            let (_, rows) = run_point_query(&table, id).await;
+            assert_eq!(rows, 0, "deleted row id={id} is still visible");
+        }
+        let outside = mutation_first_row_outside_bucket(cfg.scalar_rows, bucket);
+        let (_, rows) = run_point_query(&table, outside as i32).await;
+        assert_eq!(rows, 1, "non-target row id={outside} was deleted");
+
+        emit(
+            "indexlake",
+            "mutate",
+            &[
+                ("table", "scalar_delete_cond".to_string()),
+                ("op", "delete_conditional".to_string()),
+                ("window", window.to_string()),
+                ("bucket", bucket.to_string()),
+                ("rows_target", expected.to_string()),
+                ("rows_affected", affected.to_string()),
+                ("elapsed_ms", elapsed.as_millis().to_string()),
+                (
+                    "rows_per_s",
+                    format!("{:.1}", rows_per_second(affected, elapsed)),
+                ),
+            ],
+        );
+    }
+
+    emit(
+        "indexlake",
+        "mutate",
+        &[
+            ("table", "scalar_delete_cond".to_string()),
+            ("op", "state".to_string()),
+            (
+                "prefix",
+                format!("{}/{}", table.namespace_id, table.table_id),
+            ),
+            (
+                "data_files",
+                table.data_file_count().await.unwrap().to_string(),
+            ),
+            (
+                "inline_rows",
+                table.inline_row_count().await.unwrap().to_string(),
+            ),
+        ],
+    );
+}
+
+async fn mutate_conditional(client: &Client, cfg: &BenchConfig, namespace: &str) {
+    let buckets = mutation_window_buckets(cfg.mutation_bucket, cfg.mutation_windows);
+    mutate_conditional_update(client, cfg, namespace, &buckets).await;
+    mutate_conditional_delete(client, cfg, namespace, &buckets).await;
+}
+
 async fn query_vector_phase(client: &Client, cfg: &BenchConfig, namespace: &str) {
     let table = client.load_table(namespace, "vector").await.unwrap();
 
@@ -665,6 +966,10 @@ async fn main() {
         }
         "query-scalar" => query_scalar(&client, &cfg, &namespace).await,
         "query-vector" => query_vector_phase(&client, &cfg, &namespace).await,
+        "mutate-conditional" => {
+            client.create_namespace(&namespace, true).await.unwrap();
+            mutate_conditional(&client, &cfg, &namespace).await;
+        }
         other => panic!("unknown phase '{other}'\nusage: indexlake-bench {USAGE}"),
     }
 }
