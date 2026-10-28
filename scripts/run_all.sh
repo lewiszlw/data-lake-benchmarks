@@ -22,7 +22,7 @@ export no_proxy="${no_proxy:+${no_proxy},}127.0.0.1,localhost"
 : "${PERF_LANCE_PREFIX:=perf-eval/lance}"
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
-    cargo build --release -p indexlake-bench -p lance-bench
+    cargo build --release --bins
 fi
 
 IL="$ROOT/target/release/indexlake-bench"
@@ -76,6 +76,5 @@ echo "== queries =="
 "$LA" query-scalar "$RUN_ID" | tee "$OUT/lance-query-scalar.log"
 "$IL" query-vector "$RUN_ID" | tee "$OUT/indexlake-query-vector.log"
 "$LA" query-vector "$RUN_ID" | tee "$OUT/lance-query-vector.log"
-"$IL" probe "$RUN_ID" | tee "$OUT/indexlake-probe.log"
 
 echo "done: $OUT"

@@ -11,7 +11,7 @@ use arrow::array::{
 };
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use bench_core::{
+use data_lake_benchmarks::{
     emit, ground_truth, mib_per_second, parse_cli, query_vector, rows_per_second, scalar_blob,
     scalar_payload, scalar_raw_bytes, splitmix64, stats, vector_raw_bytes, BenchConfig, QUERY_SEED,
 };
@@ -26,13 +26,11 @@ use indexlake::table::{
 };
 use indexlake::{Client, ILError};
 use indexlake_catalog_postgres::PostgresCatalogBuilder;
-use indexlake_index_btree::{BTreeIndexKind, BTreeIndexParams};
 use indexlake_index_hnsw::{HnswIndexKind, HnswIndexParams, HnswSearchQuery};
 use indexlake_storage_s3::S3Storage;
 use opendal::services::S3Config;
 
-const USAGE: &str =
-    "<ingest-bulk|ingest-insert|index|query|query-scalar|query-vector|probe> [run-id]";
+const USAGE: &str = "<ingest-bulk|ingest-insert|index|query|query-scalar|query-vector> [run-id]";
 
 async fn client(cfg: &BenchConfig) -> Client {
     let catalog = Arc::new(
@@ -60,7 +58,6 @@ async fn client(cfg: &BenchConfig) -> Client {
     let storage = Arc::new(S3Storage::new(s3, cfg.s3_bucket.clone()));
 
     let mut client = Client::new(catalog, storage);
-    client.register_index_kind(Arc::new(BTreeIndexKind));
     client.register_index_kind(Arc::new(HnswIndexKind));
     client
 }
@@ -76,7 +73,8 @@ fn scalar_schema() -> SchemaRef {
 fn scalar_batch(schema: SchemaRef, start: usize, rows: usize) -> RecordBatch {
     let ids: Vec<i32> = (start..start + rows).map(|row| row as i32).collect();
     let payloads: Vec<String> = (start..start + rows).map(scalar_payload).collect();
-    let mut blobs = BinaryBuilder::with_capacity(rows, rows * bench_core::SCALAR_BLOB_LEN);
+    let mut blobs =
+        BinaryBuilder::with_capacity(rows, rows * data_lake_benchmarks::SCALAR_BLOB_LEN);
     for row in start..start + rows {
         blobs.append_value(scalar_blob(row));
     }
@@ -112,9 +110,11 @@ fn vector_batch(schema: SchemaRef, start: usize, rows: usize, dim: usize) -> Rec
         FixedSizeListBuilder::new(Float32Builder::new(), dim as i32).with_field(inner);
     for row in start..start + rows {
         for d in 0..dim {
-            builder
-                .values()
-                .append_value(bench_core::f32_at(bench_core::DATA_SEED, row, d));
+            builder.values().append_value(data_lake_benchmarks::f32_at(
+                data_lake_benchmarks::DATA_SEED,
+                row,
+                d,
+            ));
         }
         builder.append(true);
     }
@@ -357,32 +357,6 @@ async fn ingest_insert_vector(client: &Client, cfg: &BenchConfig, namespace: &st
         ],
     );
     table
-}
-
-async fn create_scalar_index(table: &Table) {
-    let creation = IndexCreation {
-        name: "id_idx".to_string(),
-        kind: BTreeIndexKind.kind().to_string(),
-        key_columns: vec!["id".to_string()],
-        params: Arc::new(BTreeIndexParams {}),
-        concurrency: 1,
-        if_not_exists: false,
-        config: Default::default(),
-    };
-    let start = Instant::now();
-    table
-        .clone()
-        .create_index(creation)
-        .await
-        .expect("BTree index build failed");
-    emit(
-        "indexlake",
-        "index",
-        &[
-            ("table", "scalar".to_string()),
-            ("build_ms", start.elapsed().as_millis().to_string()),
-        ],
-    );
 }
 
 async fn create_vector_index(table: &Table, cfg: &BenchConfig) {
@@ -646,56 +620,6 @@ async fn query_vector_phase(client: &Client, cfg: &BenchConfig, namespace: &str)
     );
 }
 
-async fn probe(client: &Client, cfg: &BenchConfig, namespace: &str) {
-    let table = client.load_table(namespace, "scalar").await.unwrap();
-    let id = (cfg.scalar_rows / 2).max(1) as i32;
-    let scans: [(&str, TableScan); 2] = [
-        ("indexed_id", point_scan(id)),
-        (
-            "nonindexed_payload",
-            TableScan::default()
-                .with_filters(vec![
-                    col("payload").eq(lit(Scalar::Utf8(Some(scalar_payload(id as usize)))))
-                ])
-                .with_projection(Some(vec![1]))
-                .with_batch_size(16),
-        ),
-    ];
-
-    for (label, scan) in scans {
-        for _ in 0..2 {
-            let mut stream = table.scan(scan.clone()).await.unwrap();
-            let mut rows = 0usize;
-            while let Some(batch) = stream.next().await {
-                rows += batch.unwrap().num_rows();
-            }
-            assert_eq!(rows, 1);
-        }
-        let mut samples = Vec::new();
-        for _ in 0..10 {
-            let start = Instant::now();
-            let mut stream = table.scan(scan.clone()).await.unwrap();
-            let mut rows = 0usize;
-            while let Some(batch) = stream.next().await {
-                rows += batch.unwrap().num_rows();
-            }
-            assert_eq!(rows, 1);
-            samples.push(start.elapsed().as_secs_f64() * 1000.0);
-        }
-        let stats = stats(samples);
-        emit(
-            "indexlake",
-            "probe",
-            &[
-                ("op", label.to_string()),
-                ("p50_ms", format!("{:.3}", stats.p50)),
-                ("p95_ms", format!("{:.3}", stats.p95)),
-                ("mean_ms", format!("{:.3}", stats.mean)),
-            ],
-        );
-    }
-}
-
 #[tokio::main]
 async fn main() {
     env_logger::init();
@@ -732,8 +656,6 @@ async fn main() {
             ingest_insert_vector(&client, &cfg, &namespace).await;
         }
         "index" => {
-            let scalar = client.load_table(&namespace, "scalar").await.unwrap();
-            create_scalar_index(&scalar).await;
             let vector = client.load_table(&namespace, "vector").await.unwrap();
             create_vector_index(&vector, &cfg).await;
         }
@@ -743,7 +665,6 @@ async fn main() {
         }
         "query-scalar" => query_scalar(&client, &cfg, &namespace).await,
         "query-vector" => query_vector_phase(&client, &cfg, &namespace).await,
-        "probe" => probe(&client, &cfg, &namespace).await,
         other => panic!("unknown phase '{other}'\nusage: indexlake-bench {USAGE}"),
     }
 }

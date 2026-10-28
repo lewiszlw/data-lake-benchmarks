@@ -1,31 +1,27 @@
-[workspace]
-resolver = "2"
-members = [
-    "crates/bench-core",
-    "crates/indexlake-bench",
-    "crates/lance-bench",
-]
-
-[workspace.package]
+[package]
+name = "data-lake-benchmarks"
 version = "0.1.0"
 edition = "2021"
 license = "MIT"
 publish = false
 
-[workspace.dependencies]
-bench-core = { path = "crates/bench-core" }
+[dependencies]
 env_logger = "0.11"
 futures = "0.3"
 tokio = { version = "1", features = ["full"] }
 uuid = { version = "1", features = ["v4"] }
 
-# Both engines are consumed directly from git. The revisions below are the
-# ones used for the published measurements in docs/RESULTS.md.
-indexlake = { git = "https://github.com/systemxlabs/indexlake", rev = "6fe5c37e9dfdb5d7bfc91cc5a0d71f6b963e16e4" }
-indexlake-catalog-postgres = { git = "https://github.com/systemxlabs/indexlake", rev = "6fe5c37e9dfdb5d7bfc91cc5a0d71f6b963e16e4" }
-indexlake-index-btree = { git = "https://github.com/systemxlabs/indexlake", rev = "6fe5c37e9dfdb5d7bfc91cc5a0d71f6b963e16e4" }
-indexlake-index-hnsw = { git = "https://github.com/systemxlabs/indexlake", rev = "6fe5c37e9dfdb5d7bfc91cc5a0d71f6b963e16e4" }
-indexlake-storage-s3 = { git = "https://github.com/systemxlabs/indexlake", rev = "6fe5c37e9dfdb5d7bfc91cc5a0d71f6b963e16e4" }
+# Both engines are consumed directly from git and resolve to Arrow 58.
+# Keep these revisions in sync with the Results section in README.md.
+arrow = "58"
+arrow-array = "58"
+arrow-schema = "58"
+opendal = "0.57"
+
+indexlake = { git = "https://github.com/systemxlabs/indexlake", rev = "4e3ff351ac4c5a05ce4d469b91f48bf883d75e87" }
+indexlake-catalog-postgres = { git = "https://github.com/systemxlabs/indexlake", rev = "4e3ff351ac4c5a05ce4d469b91f48bf883d75e87" }
+indexlake-index-hnsw = { git = "https://github.com/systemxlabs/indexlake", rev = "4e3ff351ac4c5a05ce4d469b91f48bf883d75e87" }
+indexlake-storage-s3 = { git = "https://github.com/systemxlabs/indexlake", rev = "4e3ff351ac4c5a05ce4d469b91f48bf883d75e87" }
 
 lance = { git = "https://github.com/lance-format/lance", rev = "51415518c7566c938ba14fe29bcb357b8adf2123" }
 lance-index = { git = "https://github.com/lance-format/lance", rev = "51415518c7566c938ba14fe29bcb357b8adf2123" }

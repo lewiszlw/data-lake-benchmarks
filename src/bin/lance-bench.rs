@@ -12,7 +12,7 @@ use arrow_array::{
     RecordBatchReader, StringArray,
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
-use bench_core::{
+use data_lake_benchmarks::{
     emit, ground_truth, mib_per_second, parse_cli, query_vector, rows_per_second, scalar_blob,
     scalar_payload, scalar_raw_bytes, splitmix64, stats, vector_raw_bytes, BenchConfig, QUERY_SEED,
 };
@@ -24,7 +24,7 @@ use lance::index::DatasetIndexExt;
 use lance::io::{ObjectStoreParams, StorageOptionsAccessor};
 use lance_index::vector::hnsw::builder::HnswBuildParams;
 use lance_index::vector::ivf::IvfBuildParams;
-use lance_index::{scalar::ScalarIndexParams, IndexType};
+use lance_index::IndexType;
 use lance_linalg::distance::DistanceType;
 
 const USAGE: &str = "<ingest|index|query|query-scalar|query-vector> [run-id]";
@@ -63,7 +63,8 @@ fn scalar_schema() -> SchemaRef {
 fn scalar_batch(schema: SchemaRef, start: usize, rows: usize) -> RecordBatch {
     let ids: Vec<i32> = (start..start + rows).map(|row| row as i32).collect();
     let payloads: Vec<String> = (start..start + rows).map(scalar_payload).collect();
-    let mut blobs = BinaryBuilder::with_capacity(rows, rows * bench_core::SCALAR_BLOB_LEN);
+    let mut blobs =
+        BinaryBuilder::with_capacity(rows, rows * data_lake_benchmarks::SCALAR_BLOB_LEN);
     for row in start..start + rows {
         blobs.append_value(scalar_blob(row));
     }
@@ -97,7 +98,11 @@ fn vector_batch(schema: SchemaRef, start: usize, rows: usize, dim: usize) -> Rec
     let mut values = Vec::with_capacity(rows * dim);
     for row in start..start + rows {
         for d in 0..dim {
-            values.push(bench_core::f32_at(bench_core::DATA_SEED, row, d));
+            values.push(data_lake_benchmarks::f32_at(
+                data_lake_benchmarks::DATA_SEED,
+                row,
+                d,
+            ));
         }
     }
     let list = FixedSizeListArray::new(
@@ -209,30 +214,6 @@ async fn ingest_vector(cfg: &BenchConfig, run_id: &str) {
                     mib_per_second(vector_raw_bytes(cfg.vector_rows, cfg.dim), elapsed)
                 ),
             ),
-        ],
-    );
-}
-
-async fn build_scalar_index(cfg: &BenchConfig, run_id: &str) {
-    let mut dataset = open_dataset(cfg, &cfg.lance_dataset_uri(run_id, "scalar")).await;
-    let params = ScalarIndexParams::default();
-    let start = Instant::now();
-    dataset
-        .create_index(
-            &["id"],
-            IndexType::BTree,
-            Some("id_idx".to_string()),
-            &params,
-            true,
-        )
-        .await
-        .expect("BTree index build failed");
-    emit(
-        "lance",
-        "index",
-        &[
-            ("table", "scalar".to_string()),
-            ("build_ms", start.elapsed().as_millis().to_string()),
         ],
     );
 }
@@ -488,7 +469,6 @@ async fn main() {
             ingest_vector(&cfg, &cli.run_id).await;
         }
         "index" => {
-            build_scalar_index(&cfg, &cli.run_id).await;
             build_vector_index(&cfg, &cli.run_id).await;
         }
         "query" => {
