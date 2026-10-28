@@ -29,8 +29,7 @@ use lance_index::vector::ivf::IvfBuildParams;
 use lance_index::IndexType;
 use lance_linalg::distance::DistanceType;
 
-const USAGE: &str =
-    "<ingest|index|query|query-scalar|query-vector|mutate-conditional|insert-single> [run-id]";
+const USAGE: &str = "<ingest|index|query|query-scalar|query-vector|mutate-conditional> [run-id]";
 
 const INSERT_WARMUPS: usize = 5;
 
@@ -651,7 +650,7 @@ async fn insert_single(cfg: &BenchConfig, run_id: &str) {
         "PERF_SINGLE_INSERTS must be greater than zero"
     );
 
-    let mut dataset = write_scalar_seed(cfg, run_id, "scalar_insert_single").await;
+    let mut dataset = write_scalar_seed(cfg, run_id, "single_insert").await;
     let schema = scalar_schema();
     let append_params = WriteParams {
         store_params: Some(store_params(cfg)),
@@ -660,9 +659,9 @@ async fn insert_single(cfg: &BenchConfig, run_id: &str) {
 
     emit(
         "lance",
-        "insert",
+        "ingest",
         &[
-            ("table", "scalar_insert_single".to_string()),
+            ("table", "single_insert".to_string()),
             ("op", "prepare".to_string()),
             ("rows", cfg.scalar_rows.to_string()),
             ("fragments", dataset.get_fragments().len().to_string()),
@@ -715,9 +714,9 @@ async fn insert_single(cfg: &BenchConfig, run_id: &str) {
     let stats = stats(samples);
     emit(
         "lance",
-        "insert",
+        "ingest",
         &[
-            ("table", "scalar_insert_single".to_string()),
+            ("table", "single_insert".to_string()),
             ("op", "insert_single".to_string()),
             ("n", cfg.single_inserts.to_string()),
             ("warmups", INSERT_WARMUPS.to_string()),
@@ -732,11 +731,11 @@ async fn insert_single(cfg: &BenchConfig, run_id: &str) {
 
     emit(
         "lance",
-        "insert",
+        "ingest",
         &[
-            ("table", "scalar_insert_single".to_string()),
+            ("table", "single_insert".to_string()),
             ("op", "state".to_string()),
-            ("uri", cfg.lance_dataset_uri(run_id, "scalar_insert_single")),
+            ("uri", cfg.lance_dataset_uri(run_id, "single_insert")),
             ("fragments", dataset.get_fragments().len().to_string()),
         ],
     );
@@ -849,6 +848,7 @@ async fn main() {
         "ingest" => {
             ingest_scalar(&cfg, &cli.run_id).await;
             ingest_vector(&cfg, &cli.run_id).await;
+            insert_single(&cfg, &cli.run_id).await;
         }
         "index" => {
             build_vector_index(&cfg, &cli.run_id).await;
@@ -860,7 +860,6 @@ async fn main() {
         "query-scalar" => query_scalar(&cfg, &cli.run_id).await,
         "query-vector" => query_vector_phase(&cfg, &cli.run_id).await,
         "mutate-conditional" => mutate_conditional(&cfg, &cli.run_id).await,
-        "insert-single" => insert_single(&cfg, &cli.run_id).await,
         other => panic!("unknown phase '{other}'\nusage: lance-bench {USAGE}"),
     }
 }

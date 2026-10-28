@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# End-to-end run: ingest both engines without indexes, measure storage, build
-# indexes, measure storage again, then run the query phases.
+# End-to-end run: ingest both engines without indexes (bulk plus single-row
+# inserts), measure storage, build indexes, measure storage again, then run the
+# query phases.
 #
 # Usage: scripts/run_all.sh [run-id]
 # Environment: see README.md. The MinIO endpoint should stay out of HTTP_PROXY.
@@ -38,18 +39,22 @@ echo "== ingest (no indexes) =="
 
 IL_SCALAR_PREFIX="$(sed -n 's/.*scalar_prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-ingest.log" | tail -1)"
 IL_VECTOR_PREFIX="$(sed -n 's/.*vector_prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-ingest.log" | tail -1)"
+IL_INSERT_PREFIX="$(sed -n 's/.*table=single_insert .*prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-ingest.log" | tail -1)"
 LA_PREFIX="$S3_BUCKET/$PERF_LANCE_PREFIX/$RUN_ID"
 : "${IL_SCALAR_PREFIX:?failed to parse indexlake scalar prefix}"
 : "${IL_VECTOR_PREFIX:?failed to parse indexlake vector prefix}"
+: "${IL_INSERT_PREFIX:?failed to parse indexlake single-insert prefix}"
 
 {
     echo "stage=after_ingest"
-    echo -n "indexlake_scalar "; python3 "$S3" size "$IL_SCALAR_PREFIX"
-    echo -n "indexlake_vector "; python3 "$S3" size "$IL_VECTOR_PREFIX"
-    echo -n "indexlake_total  "; python3 "$S3" size "${IL_SCALAR_PREFIX%/*}"
-    echo -n "lance_scalar    "; python3 "$S3" size "$LA_PREFIX/scalar"
-    echo -n "lance_vector    "; python3 "$S3" size "$LA_PREFIX/vector"
-    echo -n "lance_total     "; python3 "$S3" size "$LA_PREFIX"
+    echo -n "indexlake_scalar        "; python3 "$S3" size "$IL_SCALAR_PREFIX"
+    echo -n "indexlake_vector        "; python3 "$S3" size "$IL_VECTOR_PREFIX"
+    echo -n "indexlake_insert_single "; python3 "$S3" size "$IL_INSERT_PREFIX"
+    echo -n "indexlake_total         "; python3 "$S3" size "${IL_SCALAR_PREFIX%/*}"
+    echo -n "lance_scalar            "; python3 "$S3" size "$LA_PREFIX/scalar"
+    echo -n "lance_vector            "; python3 "$S3" size "$LA_PREFIX/vector"
+    echo -n "lance_insert_single     "; python3 "$S3" size "$LA_PREFIX/single_insert"
+    echo -n "lance_total             "; python3 "$S3" size "$LA_PREFIX"
 } | tee "$OUT/sizes-after-ingest.txt"
 
 echo "== build indexes =="
@@ -77,8 +82,8 @@ echo "== queries =="
 "$IL" query-vector "$RUN_ID" | tee "$OUT/indexlake-query-vector.log"
 "$LA" query-vector "$RUN_ID" | tee "$OUT/lance-query-vector.log"
 
-# Mutation and single-insert phases run after the queries and use dedicated
-# tables, so they never contaminate the query datasets above.
+# Mutations run after the queries and use dedicated tables, so they never
+# contaminate the query datasets above.
 echo "== conditional mutations =="
 "$IL" mutate-conditional "$RUN_ID" | tee "$OUT/indexlake-mutate-conditional.log"
 "$LA" mutate-conditional "$RUN_ID" | tee "$OUT/lance-mutate-conditional.log"
@@ -95,18 +100,5 @@ IL_DELETE_PREFIX="$(sed -n 's/.*table=scalar_delete_cond .*prefix=\([^ ]*\).*/\1
     echo -n "lance_update_cond    "; python3 "$S3" size "$LA_PREFIX/scalar_update_cond"
     echo -n "lance_delete_cond    "; python3 "$S3" size "$LA_PREFIX/scalar_delete_cond"
 } | tee "$OUT/sizes-after-mutation.txt"
-
-echo "== single-row inserts =="
-"$IL" insert-single "$RUN_ID" | tee "$OUT/indexlake-insert-single.log"
-"$LA" insert-single "$RUN_ID" | tee "$OUT/lance-insert-single.log"
-
-IL_INSERT_PREFIX="$(sed -n 's/.*table=scalar_insert_single .*prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-insert-single.log" | tail -1)"
-: "${IL_INSERT_PREFIX:?failed to parse indexlake single-insert prefix}"
-
-{
-    echo "stage=after_single_insert"
-    echo -n "indexlake_insert_single "; python3 "$S3" size "$IL_INSERT_PREFIX"
-    echo -n "lance_insert_single    "; python3 "$S3" size "$LA_PREFIX/scalar_insert_single"
-} | tee "$OUT/sizes-after-single-insert.txt"
 
 echo "done: $OUT"

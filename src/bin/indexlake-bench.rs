@@ -32,7 +32,8 @@ use indexlake_index_hnsw::{HnswIndexKind, HnswIndexParams, HnswSearchQuery};
 use indexlake_storage_s3::S3Storage;
 use opendal::services::S3Config;
 
-const USAGE: &str = "<ingest-bulk|ingest-insert|index|query|query-scalar|query-vector|mutate-conditional|insert-single> [run-id]";
+const USAGE: &str =
+    "<ingest-bulk|ingest-insert|index|query|query-scalar|query-vector|mutate-conditional> [run-id]";
 
 const INSERT_WARMUPS: usize = 5;
 
@@ -875,7 +876,7 @@ async fn insert_single(client: &Client, cfg: &BenchConfig, namespace: &str) {
         client,
         cfg,
         namespace,
-        "scalar_insert_single",
+        "single_insert",
         schema.clone(),
         batches,
     )
@@ -883,9 +884,9 @@ async fn insert_single(client: &Client, cfg: &BenchConfig, namespace: &str) {
 
     emit(
         "indexlake",
-        "insert",
+        "ingest",
         &[
-            ("table", "scalar_insert_single".to_string()),
+            ("table", "single_insert".to_string()),
             ("op", "prepare".to_string()),
             ("rows", cfg.scalar_rows.to_string()),
             (
@@ -934,9 +935,9 @@ async fn insert_single(client: &Client, cfg: &BenchConfig, namespace: &str) {
     let stats = stats(samples);
     emit(
         "indexlake",
-        "insert",
+        "ingest",
         &[
-            ("table", "scalar_insert_single".to_string()),
+            ("table", "single_insert".to_string()),
             ("op", "insert_single".to_string()),
             ("n", cfg.single_inserts.to_string()),
             ("warmups", INSERT_WARMUPS.to_string()),
@@ -951,9 +952,9 @@ async fn insert_single(client: &Client, cfg: &BenchConfig, namespace: &str) {
 
     emit(
         "indexlake",
-        "insert",
+        "ingest",
         &[
-            ("table", "scalar_insert_single".to_string()),
+            ("table", "single_insert".to_string()),
             ("op", "state".to_string()),
             (
                 "prefix",
@@ -1080,6 +1081,7 @@ async fn main() {
             client.create_namespace(&namespace, true).await.unwrap();
             let scalar = ingest_bulk_scalar(&client, &cfg, &namespace).await;
             let vector = ingest_bulk_vector(&client, &cfg, &namespace).await;
+            insert_single(&client, &cfg, &namespace).await;
             emit(
                 "indexlake",
                 "ingest",
@@ -1115,10 +1117,6 @@ async fn main() {
         "mutate-conditional" => {
             client.create_namespace(&namespace, true).await.unwrap();
             mutate_conditional(&client, &cfg, &namespace).await;
-        }
-        "insert-single" => {
-            client.create_namespace(&namespace, true).await.unwrap();
-            insert_single(&client, &cfg, &namespace).await;
         }
         other => panic!("unknown phase '{other}'\nusage: indexlake-bench {USAGE}"),
     }
