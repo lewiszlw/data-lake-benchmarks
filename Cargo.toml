@@ -16,7 +16,11 @@ uuid = { version = "1", features = ["v4"] }
 arrow = "58"
 arrow-array = "58"
 arrow-schema = "58"
+datafusion = { version = "54.1", default-features = false, features = ["parquet", "sql"] }
+object_store = { version = "0.13", features = ["aws"] }
 opendal = "0.57"
+parquet = "58"
+url = "2"
 
 indexlake = { git = "https://github.com/systemxlabs/indexlake", rev = "4e3ff351ac4c5a05ce4d469b91f48bf883d75e87" }
 indexlake-catalog-postgres = { git = "https://github.com/systemxlabs/indexlake", rev = "4e3ff351ac4c5a05ce4d469b91f48bf883d75e87" }

@@ -1619,6 +1619,7 @@ dependencies = [
  "arrow",
  "arrow-array",
  "arrow-schema",
+ "datafusion",
  "env_logger",
  "futures",
  "indexlake",
@@ -1628,8 +1629,11 @@ dependencies = [
  "lance",
  "lance-index",
  "lance-linalg",
+ "object_store 0.13.2",
  "opendal 0.57.0",
+ "parquet",
  "tokio",
+ "url",
  "uuid",
 ]
 
@@ -1651,6 +1655,7 @@ dependencies = [
  "datafusion-datasource-arrow",
  "datafusion-datasource-csv",
  "datafusion-datasource-json",
+ "datafusion-datasource-parquet",
  "datafusion-execution",
  "datafusion-expr",
  "datafusion-expr-common",
@@ -1673,6 +1678,7 @@ dependencies = [
  "log",
  "object_store 0.13.2",
  "parking_lot",
+ "parquet",
  "sqlparser",
  "tempfile",
  "tokio",
@@ -1746,6 +1752,7 @@ dependencies = [
  "libc",
  "log",
  "object_store 0.13.2",
+ "parquet",
  "sqlparser",
  "tokio",
  "uuid",
@@ -1864,6 +1871,37 @@ dependencies = [
 ]
 
 [[package]]
+name = "datafusion-datasource-parquet"
+version = "54.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "4cc35b92cd560082155e80d9c826929c852d3c51543f4affd3a51c464a0aab3a"
+dependencies = [
+ "arrow",
+ "async-trait",
+ "bytes",
+ "datafusion-common",
+ "datafusion-common-runtime",
+ "datafusion-datasource",
+ "datafusion-execution",
+ "datafusion-expr",
+ "datafusion-functions",
+ "datafusion-functions-aggregate-common",
+ "datafusion-physical-expr",
+ "datafusion-physical-expr-adapter",
+ "datafusion-physical-expr-common",
+ "datafusion-physical-plan",
+ "datafusion-pruning",
+ "datafusion-session",
+ "futures",
+ "itertools 0.14.0",
+ "log",
+ "object_store 0.13.2",
+ "parking_lot",
+ "parquet",
+ "tokio",
+]
+
+[[package]]
 name = "datafusion-doc"
 version = "54.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1948,7 +1986,7 @@ dependencies = [
  "hex",
  "itertools 0.14.0",
  "log",
- "md-5",
+ "md-5 0.11.0",
  "memchr",
  "num-traits",
  "rand 0.9.5",
@@ -4758,6 +4796,16 @@ dependencies = [
 
 [[package]]
 name = "md-5"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
+dependencies = [
+ "cfg-if",
+ "digest 0.10.7",
+]
+
+[[package]]
+name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
@@ -5131,16 +5179,28 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "622acbc9100d3c10e2ee15804b0caa40e55c933d5aa53814cd520805b7958a49"
 dependencies = [
  "async-trait",
+ "base64 0.22.1",
  "bytes",
  "chrono",
+ "form_urlencoded",
  "futures-channel",
  "futures-core",
  "futures-util",
  "http",
+ "http-body-util",
  "humantime",
+ "hyper",
  "itertools 0.14.0",
+ "md-5 0.10.6",
  "parking_lot",
  "percent-encoding",
+ "quick-xml 0.39.4",
+ "rand 0.10.3",
+ "reqwest 0.12.28",
+ "ring",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
  "thiserror 2.0.21",
  "tokio",
  "tracing",
@@ -5172,7 +5232,7 @@ dependencies = [
  "humantime",
  "hyper",
  "itertools 0.15.0",
- "md-5",
+ "md-5 0.11.0",
  "nix",
  "parking_lot",
  "percent-encoding",
@@ -5281,7 +5341,7 @@ dependencies = [
  "http-body",
  "jiff",
  "log",
- "md-5",
+ "md-5 0.11.0",
  "mea",
  "percent-encoding",
  "quick-xml 0.39.4",
@@ -5309,7 +5369,7 @@ dependencies = [
  "http",
  "jiff",
  "log",
- "md-5",
+ "md-5 0.11.0",
  "percent-encoding",
  "quick-xml 0.42.0",
  "reqsign-core",
@@ -5571,7 +5631,7 @@ dependencies = [
  "crc32c",
  "http",
  "log",
- "md-5",
+ "md-5 0.11.0",
  "opendal-core 0.57.0",
  "quick-xml 0.39.4",
  "reqsign-aws-v4",
@@ -5592,7 +5652,7 @@ dependencies = [
  "crc-fast",
  "http",
  "log",
- "md-5",
+ "md-5 0.11.0",
  "opendal-core 0.59.5",
  "quick-xml 0.42.0",
  "reqsign-aws-v4",
@@ -5728,6 +5788,7 @@ dependencies = [
  "num-bigint",
  "num-integer",
  "num-traits",
+ "object_store 0.13.2",
  "paste",
  "seq-macro",
  "simdutf8",
@@ -5954,7 +6015,7 @@ dependencies = [
  "bytes",
  "fallible-iterator",
  "hmac 0.13.0",
- "md-5",
+ "md-5 0.11.0",
  "memchr",
  "rand 0.10.3",
  "sha2 0.11.1",

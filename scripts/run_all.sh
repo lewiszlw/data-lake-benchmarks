@@ -21,6 +21,7 @@ export no_proxy="${no_proxy:+${no_proxy},}127.0.0.1,localhost"
 
 : "${S3_BUCKET:=indexlake}"
 : "${PERF_LANCE_PREFIX:=perf-eval/lance}"
+: "${PERF_PARQUET_PREFIX:=perf-eval/parquet}"
 
 if [[ "${SKIP_BUILD:-0}" != "1" ]]; then
     cargo build --release --bins
@@ -28,6 +29,7 @@ fi
 
 IL="$ROOT/target/release/indexlake-bench"
 LA="$ROOT/target/release/lance-bench"
+DF="$ROOT/target/release/datafusion-bench"
 S3="$ROOT/scripts/s3_size.py"
 
 echo "run-id: $RUN_ID"
@@ -36,11 +38,13 @@ echo "results: $OUT"
 echo "== ingest (no indexes) =="
 "$IL" ingest-bulk "$RUN_ID" | tee "$OUT/indexlake-ingest.log"
 "$LA" ingest "$RUN_ID" | tee "$OUT/lance-ingest.log"
+"$DF" ingest "$RUN_ID" | tee "$OUT/datafusion-ingest.log"
 
 IL_SCALAR_PREFIX="$(sed -n 's/.*scalar_prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-ingest.log" | tail -1)"
 IL_VECTOR_PREFIX="$(sed -n 's/.*vector_prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-ingest.log" | tail -1)"
 IL_INSERT_PREFIX="$(sed -n 's/.*table=single_insert .*prefix=\([^ ]*\).*/\1/p' "$OUT/indexlake-ingest.log" | tail -1)"
 LA_PREFIX="$S3_BUCKET/$PERF_LANCE_PREFIX/$RUN_ID"
+DF_PREFIX="$PERF_PARQUET_PREFIX/$RUN_ID/scalar"
 : "${IL_SCALAR_PREFIX:?failed to parse indexlake scalar prefix}"
 : "${IL_VECTOR_PREFIX:?failed to parse indexlake vector prefix}"
 : "${IL_INSERT_PREFIX:?failed to parse indexlake single-insert prefix}"
@@ -55,6 +59,8 @@ LA_PREFIX="$S3_BUCKET/$PERF_LANCE_PREFIX/$RUN_ID"
     echo -n "lance_vector            "; python3 "$S3" size "$LA_PREFIX/vector"
     echo -n "lance_insert_single     "; python3 "$S3" size "$LA_PREFIX/single_insert"
     echo -n "lance_total             "; python3 "$S3" size "$LA_PREFIX"
+    echo -n "datafusion_scalar       "; python3 "$S3" size "$DF_PREFIX"
+    echo -n "datafusion_total        "; python3 "$S3" size "$PERF_PARQUET_PREFIX/$RUN_ID"
 } | tee "$OUT/sizes-after-ingest.txt"
 
 echo "== build indexes =="
@@ -79,6 +85,7 @@ fi
 echo "== queries =="
 "$IL" query-scalar "$RUN_ID" | tee "$OUT/indexlake-query-scalar.log"
 "$LA" query-scalar "$RUN_ID" | tee "$OUT/lance-query-scalar.log"
+"$DF" query-scalar "$RUN_ID" | tee "$OUT/datafusion-query-scalar.log"
 "$IL" query-vector "$RUN_ID" | tee "$OUT/indexlake-query-vector.log"
 "$LA" query-vector "$RUN_ID" | tee "$OUT/lance-query-vector.log"
 
