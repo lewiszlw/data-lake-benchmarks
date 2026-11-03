@@ -9,7 +9,7 @@ lockfile 只解析出一个 Arrow 版本。
 | 操作 | 工作负载 |
 |---|---|
 | 批量写入 | 100 万行 scalar 与 10 万 × 1024 维向量，无索引 |
-| 单行插入 | 向专用种子表逐行追加，无索引 |
+| 单条写入 | 向专用种子表逐条追加，无索引 |
 | 全表扫描 | 读取全部 scalar 列并统计行数 |
 | 范围扫描 | 在 100 万行上扫描连续的 `id ∈ [start, start + 10k)`，**无二级索引** |
 | 向量检索 | 10 万条向量上的 Top-10 ANN（HNSW，L2） |
@@ -90,7 +90,7 @@ psql -h 127.0.0.1 -U postgres -d postgres -f scripts/init-indexlake-catalog.sql
 | `PERF_CONCURRENCY` | `8` | 扫描分区数与 ANN 客户端并发度 |
 | `PERF_MUTATION_BUCKET` | `7` | 条件变更的起始 `id % 100` bucket |
 | `PERF_MUTATION_WINDOWS` | `3` | 互不重叠的变更窗口；窗口 `i` 使用 `bucket + 10 * i` |
-| `PERF_SINGLE_INSERTS` | `100` | 单行插入的测量次数（另有 5 次 warmup） |
+| `PERF_SINGLE_INSERTS` | `100` | 单条写入的测量次数（另有 5 次 warmup） |
 | `PERF_LANCE_PREFIX` | `perf-eval/lance` | Lance dataset 在 bucket 下的前缀 |
 | `PERF_PARQUET_PREFIX` | `perf-eval/parquet` | DataFusion ListingTable 的 Parquet dataset 前缀 |
 
@@ -123,7 +123,7 @@ target/release/datafusion-bench ingest my-run          # Parquet dataset for Lis
 target/release/datafusion-bench query-scalar my-run    # full scan + range scan
 ```
 
-`ingest-bulk` / `ingest` 内部同时执行批量写入和单行插入基准。
+`ingest-bulk` / `ingest` 内部同时执行批量写入和单条写入基准。
 
 `run_all.sh` 会把日志和大小快照写入 `results/<run-id>/`。
 
@@ -139,8 +139,9 @@ python3 scripts/s3_size.py size perf-eval/lance/<run-id>  # Lance
 ## 结果
 
 以下结果来自多次独立运行，run id 在各小节标注。查询分为扫描和索引查询；扫描
-包括全表扫描（单流 / 8 流）和 range scan。写入、ANN 和存储主表仍是
-2026-10-28 的历史测量。
+包括全表扫描（单流 / 8 流）和 range scan。写入主表中的 IndexLake/Lance 数字
+以及 ANN、存储主表仍是 2026-10-28 的历史测量；DataFusion 和单条写入来自后续
+运行。
 
 | 项目 | 值 |
 |---|---|
@@ -161,11 +162,12 @@ python3 scripts/s3_size.py size perf-eval/lance/<run-id>  # Lance
 
 ### 写入（无索引）
 
+#### 批量写入
+
 | 引擎 / 路径 | Scalar 100 万 | Vector 10 万 |
 |---|---:|---:|
 | IndexLake `bypass_insert` | 3.09–3.53s，中位数 **3.35s**（约 299k rows/s） | 2.35–5.35s，中位数 **4.65s**（约 21.5k rows/s） |
 | Lance `Dataset::write` | 1.60–1.84s，中位数 **1.61s**（约 620k rows/s） | 2.77–3.57s，中位数 **3.26s**（约 30.7k rows/s） |
-| IndexLake 原生 `insert` | 10.29s（API 3.55s + dump 6.74s） | 17.42s（API 8.68s + dump 8.74s） |
 | DataFusion 批量写入（Parquet writer） | 3.21s（约 311k rows/s） | — |
 
 DataFusion 行来自 `df-20261103T034709Z` 的单次运行：使用 arrow-rs Parquet
@@ -175,34 +177,30 @@ writer、Zstd(3)，10 个文件，数据集大小 132.4 MiB。它不是 DataFusi
 成对运行比值：Lance 在 scalar 上约快 2.1x，在 vector 上约快 1.4x。MinIO
 写入吞吐在不同时间窗口波动明显；成对比值比绝对时间更稳定。
 
-IndexLake 原生 `insert` 仍把行暂存在 PostgreSQL 并异步 dump，因此比
-`bypass_insert` 慢 3x（scalar）到 4x（vector）。
+#### 单条写入
 
-#### 单行插入
-
-单行插入现在作为 ingest phase 的一部分执行。以下数据来自
-`ing-20261028T092057Z`；该次运行同时执行了 bulk ingest，上面的 bulk 表格
+单条写入现在作为 ingest phase 的一部分执行。以下数据来自
+`ing-20261028T092057Z`；该次运行同时执行了批量写入，上面的批量写入表格
 仍保留此前多次运行的中位数。专用种子表先通过 bulk 路径写入 100 万行，再
-逐行追加 100 行（5 次 warmup 不计入）。时间为每次插入。
+逐条追加 100 条（5 次 warmup 不计入）。时间为每次写入。
 
 | 引擎 | p50 (ms) | p95 (ms) | mean (ms) | min / max (ms) | p50 对应 inserts/s |
 |---|---:|---:|---:|---:|---:|
 | IndexLake | 1.304 | 1.643 | 1.361 | 0.958 / 4.291 | 767 |
 | Lance | 13.582 | 18.018 | 13.311 | 4.581 / 18.686 | 74 |
 
-插入后状态：
+写入后状态：
 
 | 引擎 | S3 占用 | 状态 |
 |---|---:|---|
 | IndexLake | 274.5 MiB（10 objects） | 105 行在 PostgreSQL inline storage；data files 未变 |
-| Lance | 153.9 MiB（327 objects） | 115 个 fragment（10 个种子 + 105 次单行 append） |
+| Lance | 153.9 MiB（327 objects） | 115 个 fragment（10 个种子 + 105 次单条 append） |
 
-按 p50，Lance 单行插入比 IndexLake 慢约 10.4x。成本主要来自每次 append 的
+按 p50，Lance 单条写入比 IndexLake 慢约 10.4x。成本主要来自每次 append 的
 fragment 写入和 manifest 提交，而不是数据字节：S3 字节基本不变，对象数升到
 327。IndexLake 只提交一条 PostgreSQL inline 行；其延迟 dump 未计入。
 
-这是最坏的 one-row-per-commit 模式。应用只要每次提交多行，就能摊薄 Lance
-的提交成本。
+这是最坏的逐条提交模式。应用只要每次提交多行，就能摊薄 Lance 的提交成本。
 
 ### 查询
 
@@ -331,11 +329,11 @@ Lance 使用多线程构建；固定版本的 IndexLake `hnsw_rs` builder 对每
   storage，并把旧行置为 invalid；Lance 把命中行写成新 fragment，并添加
   deletion vector。IndexLake 延迟的 inline-row dump/merge 不计入 update
   延迟，因此要结合时间和存储位置一起看，不能只看 S3 字节数。
-- **单行插入** 作为 ingest phase 的一部分执行：先用 bulk 路径写入一张专用
-  100 万行种子表，再逐行追加；5 次 warmup 不计入。IndexLake 把每行暂存在
+- **单条写入** 作为 ingest phase 的一部分执行：先用 bulk 路径写入一张专用
+  100 万行种子表，再逐条追加；5 次 warmup 不计入。IndexLake 把每条暂存在
   PostgreSQL inline storage，测量窗口低于 `PERF_INLINE_LIMIT`，因此不会触发
   dump，延迟物化未计入。Lance 每次 append 提交一个新 fragment/version，因此
-  延迟和 fragment 数包含逐行 S3 写入与提交。
+  延迟和 fragment 数包含逐条 S3 写入与提交。
 - **DataFusion ListingTable 基线** 读取由 `datafusion-bench ingest` 写出的
   Parquet dataset。写入使用 arrow-rs Parquet writer，Zstd(3)，每 10 万行一个
   文件、每 1 万行一个 row group。查询通过 `SessionContext` 注册
