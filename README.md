@@ -138,10 +138,9 @@ python3 scripts/s3_size.py size perf-eval/lance/<run-id>  # Lance
 
 ## 结果
 
-以下主表是 2026-10-28 使用上一版 point-lookup 套件测得的结果。当前套件已改为
-range scan；如需刷新 IndexLake/Lance 的查询数字，请重新运行
-`scripts/run_all.sh`。DataFusion 和条件变更的结果来自后续独立运行，已在各自
-小节标注 run id。
+以下结果来自多次独立运行，run id 在各小节标注。查询分为扫描和索引查询；扫描
+包括全表扫描（单流 / 8 流）和 range scan。写入、ANN 和存储主表仍是
+2026-10-28 的历史测量。
 
 | 项目 | 值 |
 |---|---|
@@ -158,7 +157,6 @@ range scan；如需刷新 IndexLake/Lance 的查询数字，请重新运行
 - Scalar：1,000,000 行（`id Int32`、128 字节可压缩文本、128 字节随机二进制），
   逻辑原始大小 248.0 MiB。
 - Vector：100,000 × 1024 维 `f32`，逻辑原始大小 391.0 MiB。
-- 点查（上一版）：对 `id` 做等值过滤，**无 scalar 索引**。
 - 向量索引：HNSW L2，`ef_construction=400`，`ef_search=256`，`k=10`。
 
 ### 写入（无索引）
@@ -208,40 +206,38 @@ fragment 写入和 manifest 提交，而不是数据字节：S3 字节基本不�
 
 ### 查询
 
+查询分为两块：**扫描**（无二级索引）和**索引查询**（HNSW）。
+
+#### 扫描
+
+| 操作 | IndexLake | Lance | DataFusion |
+|---|---:|---:|---:|
+| 全表扫描，单流 | 1038.7 ms（963k rows/s） | 65.3 ms（15.3M rows/s） | 640.2 ms（1.56M rows/s） |
+| 全表扫描，8 流 | 328.2 ms（3.05M rows/s） | — | 149.1 ms（6.71M rows/s） |
+| Range scan，1%（1 万行），p50 / p95 | 294.424 / 321.707 ms | 7.561 / 12.344 ms | 6.390 / 9.027 ms |
+
+IndexLake/Lance 的数字来自 `ing-20261028T092057Z`，DataFusion 来自
+`df-20261103T034709Z`。全表扫描取 3 次运行的最佳值；IndexLake/Lance 的首次
+运行包含冷启动（分别为 3.66 s 和 5.58 s），因此没有计入。DataFusion 的
+Parquet 数据集由 `datafusion-bench ingest` 写出（Zstd(3)，10 个文件，每个 row
+group 1 万行）；单流使用 `target_partitions=1`，8 流使用
+`target_partitions=8`，SQL 规划时间计入延迟。
+
+Range scan 的 p50 差距主要来自元数据/规划路径：Lance 和 DataFusion 都在
+6–8 ms，IndexLake 为 294 ms。
+
+#### 索引查询
+
 | 操作 | IndexLake | Lance |
 |---|---:|---:|
-| 全表扫描，单流 | 1041.9 ms（960k rows/s） | 62.5 ms（16.0M rows/s） |
-| 全表扫描，8 流 | 364.4 ms（2.74M rows/s） | — |
-| 点查（上一版），无索引，p50 / p95 | 418.5 / 465.9 ms | 7.52 / 10.96 ms |
 | ANN p50 / p95 | 939.0 / 980.1 ms | 9.65 / 10.29 ms |
 | ANN recall@10（`ef=256`） | 0.820 | 0.345 |
 | ANN QPS，客户端并发 8 | 5.5 | 814.1 |
-
-在该版本中，点查在两边都只是带过滤的扫描。Lance 利用 file/row-group 统计与
-缓存元数据剪枝到 1 个 row group，因此无索引点查仍约 7.5 ms。IndexLake 每次
-查询都有 catalog 往返，并重新打开 Parquet metadata/row group；在没有 BTree
-的情况下，从上一版索引路径的约 1.65 s 降到约 0.42 s，但仍比 Lance 慢约
-56x。
 
 对于 ANN，固定版本的 IndexLake `hnsw_rs` 实现 recall 更高，但每次查询约慢
 97x。其延迟主要来自每次查询都从 S3 重新读取并重建约 425 MB 的索引
 （`indexlake/src/table/search.rs`）；Lance 只加载一次并缓存。阅读 ANN 延迟
 时必须同时看 recall：在 `ef=256` 时两个实现并不处于同一工作点。
-
-#### DataFusion ListingTable
-
-于 2026-11-03 在 `df-20261103T034709Z` 中测得。Parquet 数据集由
-`datafusion-bench ingest` 写出（Zstd(3)，10 个文件，每个 row group 1 万行）；
-查询通过 `SessionContext` 注册 ListingTable，`target_partitions=1`。SQL
-规划时间计入延迟。只测全表扫描和 range scan。
-
-| 操作 | 结果 |
-|---|---:|
-| 全表扫描，单流 | 619.0 ms（3 次：619 / 625 / 655；1.62M rows/s） |
-| Range scan，1%（1 万行），p50 / p95 | 6.452 / 9.324 ms（约 1.55M rows/s） |
-
-该 range scan 数据尚未与 IndexLake/Lance 的 range scan 刷新结果并列；
-上方 IndexLake/Lance 的查询表仍是上一版 point-lookup 快照。
 
 ### 条件变更
 
@@ -313,10 +309,10 @@ Lance 使用多线程构建；固定版本的 IndexLake `hnsw_rs` builder 对每
 - **批量写入** 使用 IndexLake 的 `bypass_insert`，它流式写 Parquet data file
   并只提交一次，绕过 PostgreSQL inline staging。这是 Lance `Dataset::write`
   的公平对照。`ingest-insert` 单独测量事务路径。
-- **范围扫描不使用二级索引。** 不创建 BTree；谓词是
-  `id >= start AND id < start + PERF_RANGE_ROWS`，各引擎只能使用自己的
-  scan/pruning 路径。随机起点通常会跨 row-group 边界，因此默认 10k 行扫描
-  会读取 1–2 个 row group。只投影 `id`。
+- **扫描类查询不使用二级索引。** 全表扫描和 range scan 都不创建 BTree；
+  range scan 的谓词是 `id >= start AND id < start + PERF_RANGE_ROWS`，各引擎
+  只能使用自己的 scan/pruning 路径。随机起点通常会跨 row-group 边界，因此
+  默认 10k 行扫描会读取 1–2 个 row group。只投影 `id`。索引查询则是 HNSW。
 - **写入不包含索引维护**：建表时不建索引，向量索引在单独 phase 构建。
 - **查询是热缓存**：排除 warmup，然后报告 p50/p95。全表扫描 phase 报告 3 次
   运行并取最好的一次。
@@ -343,10 +339,10 @@ Lance 使用多线程构建；固定版本的 IndexLake `hnsw_rs` builder 对每
 - **DataFusion ListingTable 基线** 读取由 `datafusion-bench ingest` 写出的
   Parquet dataset。写入使用 arrow-rs Parquet writer，Zstd(3)，每 10 万行一个
   文件、每 1 万行一个 row group。查询通过 `SessionContext` 注册
-  ListingTable，`target_partitions=1`，SQL 规划时间计入延迟。ListingTable
-  本身是只读接口，因此批量写入指标衡量的是生成该 Parquet dataset 的写入
-  路径，而不是 DataFusion SQL `COPY`。三者使用各自的文件布局和压缩，扫描
-  对比不是纯执行引擎差异。
+  ListingTable：单流 `target_partitions=1`，8 流 `target_partitions=8`；
+  SQL 规划时间计入延迟。ListingTable 本身是只读接口，因此批量写入指标衡量
+  的是生成该 Parquet dataset 的写入路径，而不是 DataFusion SQL `COPY`。
+  三者使用各自的文件布局和压缩，扫描对比不是纯执行引擎差异。
 
 ### 公平性说明
 

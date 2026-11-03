@@ -143,8 +143,8 @@ async fn ingest(cfg: &BenchConfig, run_id: &str) {
     );
 }
 
-async fn context(cfg: &BenchConfig, run_id: &str) -> SessionContext {
-    let config = SessionConfig::new().with_target_partitions(1);
+async fn context(cfg: &BenchConfig, run_id: &str, target_partitions: usize) -> SessionContext {
+    let config = SessionConfig::new().with_target_partitions(target_partitions);
     let ctx = SessionContext::new_with_config(config);
 
     let bucket_url = Url::parse(&format!("s3://{}", cfg.s3_bucket)).expect("valid bucket URL");
@@ -192,13 +192,11 @@ async fn range_scan(ctx: &SessionContext, range_start: i32, range_end: i32) -> (
     (start.elapsed(), rows)
 }
 
-async fn query_scalar(cfg: &BenchConfig, run_id: &str) {
-    let ctx = context(cfg, run_id).await;
-
+async fn full_scan_phase(ctx: &SessionContext, cfg: &BenchConfig, mode: &str, partitions: usize) {
     let mut runs = Vec::new();
     let mut rows = 0;
     for _ in 0..3 {
-        let (elapsed, scanned) = full_scan(&ctx).await;
+        let (elapsed, scanned) = full_scan(ctx).await;
         assert_eq!(scanned, cfg.scalar_rows);
         rows = scanned;
         runs.push(elapsed);
@@ -210,7 +208,8 @@ async fn query_scalar(cfg: &BenchConfig, run_id: &str) {
         &[
             ("table", "scalar".to_string()),
             ("op", "full_scan".to_string()),
-            ("mode", "single".to_string()),
+            ("mode", mode.to_string()),
+            ("partitions", partitions.to_string()),
             (
                 "runs_ms",
                 format!(
@@ -227,6 +226,16 @@ async fn query_scalar(cfg: &BenchConfig, run_id: &str) {
             ),
         ],
     );
+}
+
+async fn query_scalar(cfg: &BenchConfig, run_id: &str) {
+    let single = context(cfg, run_id, 1).await;
+    full_scan_phase(&single, cfg, "single", 1).await;
+
+    let parallel = context(cfg, run_id, cfg.concurrency).await;
+    full_scan_phase(&parallel, cfg, "parallel", cfg.concurrency).await;
+
+    let ctx = single;
 
     assert!(
         cfg.range_rows > 0 && cfg.range_rows <= cfg.scalar_rows,
