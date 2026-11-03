@@ -147,10 +147,9 @@ python3 scripts/s3_size.py size perf-eval/lance/<run-id>  # Lance
 
 ## 结果
 
-以下结果来自多次独立运行，run id 在各小节标注。查询分为扫描和索引查询；扫描
-包括全表扫描（单流 / 8 流）和 range scan。写入主表中的 IndexLake/Lance 数字
-以及 ANN、存储主表仍是 2026-10-28 的历史测量；DataFusion、Iceberg 和单条写入
-来自后续运行。
+以下结果来自多次独立运行。查询分为扫描和索引查询；扫描包括全表扫描（单流 /
+8 流）和 range scan。写入主表中的 IndexLake/Lance 数字以及 ANN、存储主表仍是
+2026-10-28 的历史测量；DataFusion、Iceberg 和单条写入来自后续运行。
 
 | 项目 | 值 |
 |---|---|
@@ -180,22 +179,20 @@ python3 scripts/s3_size.py size perf-eval/lance/<run-id>  # Lance
 | DataFusion 批量写入（Parquet writer） | 3.21s（约 311k rows/s） | — |
 | Iceberg FastAppend | 2.65s（约 377k rows/s） | — |
 
-DataFusion 行来自 `df-20261103T034709Z` 的单次运行：使用 arrow-rs Parquet
-writer、Zstd(3)，10 个文件，数据集大小 132.4 MiB。它不是 DataFusion SQL
-`COPY` 路径，因为 ListingTable 本身是只读接口。
+DataFusion 行使用 arrow-rs Parquet writer：Zstd(3)，10 个文件，数据集大小
+132.4 MiB。它不是 DataFusion SQL `COPY` 路径，因为 ListingTable 本身是只读
+接口。
 
-Iceberg 行来自 `ice-20261103T133414Z`：10 个 Zstd(3) data file 加一次
-FastAppend 提交；scalar warehouse 大小 132.4 MiB。
+Iceberg 行使用 10 个 Zstd(3) data file 加一次 FastAppend 提交；scalar
+warehouse 大小 132.4 MiB。
 
 成对运行比值：Lance 在 scalar 上约快 2.1x，在 vector 上约快 1.4x。MinIO
 写入吞吐在不同时间窗口波动明显；成对比值比绝对时间更稳定。
 
 #### 单条写入
 
-单条写入现在作为 ingest phase 的一部分执行。IndexLake/Lance 数据来自
-`ing-20261028T092057Z`，Iceberg 来自 `ice-20261103T133414Z`。专用种子表先
-通过 bulk 路径写入 100 万行，再逐条追加 100 条（5 次 warmup 不计入）。时间
-为每次写入。
+单条写入现在作为 ingest phase 的一部分执行。专用种子表先通过 bulk 路径写入
+100 万行，再逐条追加 100 条（5 次 warmup 不计入）。时间为每次写入。
 
 | 引擎 | p50 (ms) | p95 (ms) | mean (ms) | min / max (ms) | p50 对应 inserts/s |
 |---|---:|---:|---:|---:|---:|
@@ -231,10 +228,8 @@ inline 行；其延迟 dump 未计入。
 | 全表扫描，8 流 | 328.2 ms（3.05M rows/s） | — | 149.1 ms（6.71M rows/s） | 294.9 ms（3.39M rows/s） |
 | Range scan，1%（1 万行），p50 / p95 | 294.424 / 321.707 ms | 7.561 / 12.344 ms | 6.390 / 9.027 ms | 9.114 / 11.989 ms |
 
-IndexLake/Lance 的数字来自 `ing-20261028T092057Z`，DataFusion 来自
-`df-20261103T034709Z`，Iceberg 来自 `ice-20261103T133414Z`。全表扫描取 3 次
-运行的最佳值；IndexLake/Lance 的首次运行包含冷启动（分别为 3.66 s 和
-5.58 s），因此没有计入。DataFusion 的 Parquet 数据集由
+全表扫描取 3 次运行的最佳值；IndexLake/Lance 的首次运行包含冷启动（分别为
+3.66 s 和 5.58 s），因此没有计入。DataFusion 的 Parquet 数据集由
 `datafusion-bench ingest` 写出（Zstd(3)，10 个文件，每个 row group 1 万行）；
 单流使用 `target_partitions=1`，8 流使用 `target_partitions=8`，SQL 规划时间
 计入延迟。Iceberg 的 8 流对应 8 个并发 data file。
@@ -260,10 +255,10 @@ action，因此条件变更同样不适用。
 
 ### 条件变更
 
-于 2026-10-28 使用当前 revision 在独立的 mutation-only run
-（`mut-20261028T090658Z`）中测得。每个引擎先写入两张专用的 100 万行表，然后
-执行 3 个互不重叠的 `bucket = id % 100` 窗口；每个窗口都精确命中 10,000 行
-（1%），并通过行级校验。时间为每个窗口的毫秒数。
+于 2026-10-28 使用当前 revision 在独立的 mutation-only 运行中测得。每个引擎
+先写入两张专用的 100 万行表，然后执行 3 个互不重叠的 `bucket = id % 100`
+窗口；每个窗口都精确命中 10,000 行（1%），并通过行级校验。时间为每个窗口的
+毫秒数。
 
 | 引擎 / 操作 | 各窗口 (ms) | 中位数 (ms) | 中位数吞吐 (rows/s) |
 |---|---:|---:|---:|
