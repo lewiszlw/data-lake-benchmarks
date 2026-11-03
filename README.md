@@ -1,7 +1,8 @@
 # 数据湖基准测试
 
 可复现的、基于 S3 的 [IndexLake](https://github.com/systemxlabs/indexlake)、
-[Lance](https://github.com/lance-format/lance) 与 DataFusion ListingTable 对比。
+[Lance](https://github.com/lance-format/lance)、DataFusion ListingTable 与
+iceberg-rust 对比。
 
 两个引擎都直接从 git 引入，并固定在使用 **Arrow 58** 的 revision 上，因此
 lockfile 只解析出一个 Arrow 版本。
@@ -19,6 +20,9 @@ lockfile 只解析出一个 Arrow 版本。
 DataFusion ListingTable 作为第三个基线，只参与批量写入、全表扫描和 range
 scan；不参与向量检索和条件变更。
 
+iceberg-rust 参与批量写入、单条写入、全表扫描和 range scan。iceberg-rust
+0.10.1 没有公开的行级 update/delete 事务 API，因此不参与条件变更和索引查询。
+
 存储字节数与压缩比通过 S3 对象大小测量。索引构建时间单独测量，避免污染写入与
 查询数字。结果见下文。
 
@@ -29,6 +33,7 @@ scan；不参与向量检索和条件变更。
 | IndexLake | `4e3ff351ac4c5a05ce4d469b91f48bf883d75e87` (`v0.5.0`) | 58 |
 | Lance | `51415518c7566c938ba14fe29bcb357b8adf2123` | 58 |
 | DataFusion | `54.1.0`（ListingTable） | 58 |
+| Iceberg | `0.10.1`（`iceberg-storage-opendal` 0.10.1） | 58 |
 
 版本固定写在 `Cargo.toml` 中。更新版本时请同步更新下文的结果。
 
@@ -93,6 +98,7 @@ psql -h 127.0.0.1 -U postgres -d postgres -f scripts/init-indexlake-catalog.sql
 | `PERF_SINGLE_INSERTS` | `100` | 单条写入的测量次数（另有 5 次 warmup） |
 | `PERF_LANCE_PREFIX` | `perf-eval/lance` | Lance dataset 在 bucket 下的前缀 |
 | `PERF_PARQUET_PREFIX` | `perf-eval/parquet` | DataFusion ListingTable 的 Parquet dataset 前缀 |
+| `PERF_ICEBERG_PREFIX` | `perf-eval/iceberg` | iceberg-rust warehouse 前缀 |
 
 ## 运行
 
@@ -121,6 +127,9 @@ target/release/lance-bench mutate-conditional my-run
 
 target/release/datafusion-bench ingest my-run          # Parquet dataset for ListingTable
 target/release/datafusion-bench query-scalar my-run    # full scan + range scan
+
+target/release/iceberg-bench ingest my-run             # bulk + single-row writes
+target/release/iceberg-bench query-scalar my-run       # full scan + range scan
 ```
 
 `ingest-bulk` / `ingest` 内部同时执行批量写入和单条写入基准。
@@ -140,8 +149,8 @@ python3 scripts/s3_size.py size perf-eval/lance/<run-id>  # Lance
 
 以下结果来自多次独立运行，run id 在各小节标注。查询分为扫描和索引查询；扫描
 包括全表扫描（单流 / 8 流）和 range scan。写入主表中的 IndexLake/Lance 数字
-以及 ANN、存储主表仍是 2026-10-28 的历史测量；DataFusion 和单条写入来自后续
-运行。
+以及 ANN、存储主表仍是 2026-10-28 的历史测量；DataFusion、Iceberg 和单条写入
+来自后续运行。
 
 | 项目 | 值 |
 |---|---|
@@ -169,25 +178,30 @@ python3 scripts/s3_size.py size perf-eval/lance/<run-id>  # Lance
 | IndexLake `bypass_insert` | 3.09–3.53s，中位数 **3.35s**（约 299k rows/s） | 2.35–5.35s，中位数 **4.65s**（约 21.5k rows/s） |
 | Lance `Dataset::write` | 1.60–1.84s，中位数 **1.61s**（约 620k rows/s） | 2.77–3.57s，中位数 **3.26s**（约 30.7k rows/s） |
 | DataFusion 批量写入（Parquet writer） | 3.21s（约 311k rows/s） | — |
+| Iceberg FastAppend | 2.65s（约 377k rows/s） | — |
 
 DataFusion 行来自 `df-20261103T034709Z` 的单次运行：使用 arrow-rs Parquet
 writer、Zstd(3)，10 个文件，数据集大小 132.4 MiB。它不是 DataFusion SQL
 `COPY` 路径，因为 ListingTable 本身是只读接口。
+
+Iceberg 行来自 `ice-20261103T133414Z`：10 个 Zstd(3) data file 加一次
+FastAppend 提交；scalar warehouse 大小 132.4 MiB。
 
 成对运行比值：Lance 在 scalar 上约快 2.1x，在 vector 上约快 1.4x。MinIO
 写入吞吐在不同时间窗口波动明显；成对比值比绝对时间更稳定。
 
 #### 单条写入
 
-单条写入现在作为 ingest phase 的一部分执行。以下数据来自
-`ing-20261028T092057Z`；该次运行同时执行了批量写入，上面的批量写入表格
-仍保留此前多次运行的中位数。专用种子表先通过 bulk 路径写入 100 万行，再
-逐条追加 100 条（5 次 warmup 不计入）。时间为每次写入。
+单条写入现在作为 ingest phase 的一部分执行。IndexLake/Lance 数据来自
+`ing-20261028T092057Z`，Iceberg 来自 `ice-20261103T133414Z`。专用种子表先
+通过 bulk 路径写入 100 万行，再逐条追加 100 条（5 次 warmup 不计入）。时间
+为每次写入。
 
 | 引擎 | p50 (ms) | p95 (ms) | mean (ms) | min / max (ms) | p50 对应 inserts/s |
 |---|---:|---:|---:|---:|---:|
 | IndexLake | 1.304 | 1.643 | 1.361 | 0.958 / 4.291 | 767 |
 | Lance | 13.582 | 18.018 | 13.311 | 4.581 / 18.686 | 74 |
+| Iceberg | 26.834 | 33.793 | 27.364 | 14.418 / 40.925 | 37 |
 
 写入后状态：
 
@@ -195,12 +209,15 @@ writer、Zstd(3)，10 个文件，数据集大小 132.4 MiB。它不是 DataFusi
 |---|---:|---|
 | IndexLake | 274.5 MiB（10 objects） | 105 行在 PostgreSQL inline storage；data files 未变 |
 | Lance | 153.9 MiB（327 objects） | 115 个 fragment（10 个种子 + 105 次单条 append） |
+| Iceberg | 138.4 MiB（434 objects） | 106 个 snapshot（1 次 seed + 105 次单条 append） |
 
-按 p50，Lance 单条写入比 IndexLake 慢约 10.4x。成本主要来自每次 append 的
-fragment 写入和 manifest 提交，而不是数据字节：S3 字节基本不变，对象数升到
-327。IndexLake 只提交一条 PostgreSQL inline 行；其延迟 dump 未计入。
+按 p50，Lance 单条写入比 IndexLake 慢约 10.4x；Iceberg 为 26.8 ms，约为
+IndexLake 的 20x、Lance 的 2x。Iceberg 每条都写一个 data file 并提交一次
+snapshot，成本主要在 metadata/manifest 提交。IndexLake 只提交一条 PostgreSQL
+inline 行；其延迟 dump 未计入。
 
-这是最坏的逐条提交模式。应用只要每次提交多行，就能摊薄 Lance 的提交成本。
+这是最坏的逐条提交模式。应用只要每次提交多行，就能摊薄 Lance 和 Iceberg
+的提交成本。
 
 ### 查询
 
@@ -208,21 +225,22 @@ fragment 写入和 manifest 提交，而不是数据字节：S3 字节基本不�
 
 #### 扫描
 
-| 操作 | IndexLake | Lance | DataFusion |
-|---|---:|---:|---:|
-| 全表扫描，单流 | 1038.7 ms（963k rows/s） | 65.3 ms（15.3M rows/s） | 640.2 ms（1.56M rows/s） |
-| 全表扫描，8 流 | 328.2 ms（3.05M rows/s） | — | 149.1 ms（6.71M rows/s） |
-| Range scan，1%（1 万行），p50 / p95 | 294.424 / 321.707 ms | 7.561 / 12.344 ms | 6.390 / 9.027 ms |
+| 操作 | IndexLake | Lance | DataFusion | Iceberg |
+|---|---:|---:|---:|---:|
+| 全表扫描，单流 | 1038.7 ms（963k rows/s） | 65.3 ms（15.3M rows/s） | 640.2 ms（1.56M rows/s） | 797.7 ms（1.25M rows/s） |
+| 全表扫描，8 流 | 328.2 ms（3.05M rows/s） | — | 149.1 ms（6.71M rows/s） | 294.9 ms（3.39M rows/s） |
+| Range scan，1%（1 万行），p50 / p95 | 294.424 / 321.707 ms | 7.561 / 12.344 ms | 6.390 / 9.027 ms | 9.114 / 11.989 ms |
 
 IndexLake/Lance 的数字来自 `ing-20261028T092057Z`，DataFusion 来自
-`df-20261103T034709Z`。全表扫描取 3 次运行的最佳值；IndexLake/Lance 的首次
-运行包含冷启动（分别为 3.66 s 和 5.58 s），因此没有计入。DataFusion 的
-Parquet 数据集由 `datafusion-bench ingest` 写出（Zstd(3)，10 个文件，每个 row
-group 1 万行）；单流使用 `target_partitions=1`，8 流使用
-`target_partitions=8`，SQL 规划时间计入延迟。
+`df-20261103T034709Z`，Iceberg 来自 `ice-20261103T133414Z`。全表扫描取 3 次
+运行的最佳值；IndexLake/Lance 的首次运行包含冷启动（分别为 3.66 s 和
+5.58 s），因此没有计入。DataFusion 的 Parquet 数据集由
+`datafusion-bench ingest` 写出（Zstd(3)，10 个文件，每个 row group 1 万行）；
+单流使用 `target_partitions=1`，8 流使用 `target_partitions=8`，SQL 规划时间
+计入延迟。Iceberg 的 8 流对应 8 个并发 data file。
 
-Range scan 的 p50 差距主要来自元数据/规划路径：Lance 和 DataFusion 都在
-6–8 ms，IndexLake 为 294 ms。
+Range scan 的 p50 差距主要来自元数据/规划路径：Lance、DataFusion 和 Iceberg
+都在 6–9 ms，IndexLake 为 294 ms。
 
 #### 索引查询
 
@@ -236,6 +254,9 @@ Range scan 的 p50 差距主要来自元数据/规划路径：Lance 和 DataFusi
 97x。其延迟主要来自每次查询都从 S3 重新读取并重建约 425 MB 的索引
 （`indexlake/src/table/search.rs`）；Lance 只加载一次并缓存。阅读 ANN 延迟
 时必须同时看 recall：在 `ef=256` 时两个实现并不处于同一工作点。
+
+Iceberg 不参与索引查询；iceberg-rust 0.10.1 也没有行级 update/delete 事务
+action，因此条件变更同样不适用。
 
 ### 条件变更
 
@@ -341,6 +362,14 @@ Lance 使用多线程构建；固定版本的 IndexLake `hnsw_rs` builder 对每
   SQL 规划时间计入延迟。ListingTable 本身是只读接口，因此批量写入指标衡量
   的是生成该 Parquet dataset 的写入路径，而不是 DataFusion SQL `COPY`。
   三者使用各自的文件布局和压缩，扫描对比不是纯执行引擎差异。
+- **iceberg-rust 基线** 使用 `iceberg 0.10.1` + `iceberg-storage-opendal`。
+  MemoryCatalog 仅用于 ingest 进程内的表注册，metadata/data 都写在 S3。写入
+  使用 Zstd(3)、10 万行/文件、1 万行/row group；批量写入为 10 个 data file
+  加一次 FastAppend 提交，单条写入为逐条 data file 加独立提交。查询进程通过
+  ingest 写下的 metadata marker 直接加载 Table，不依赖 MemoryCatalog 跨进程
+  持久化。全表扫描分别用 1 和 8 个并发 data file；range scan 使用 Iceberg
+  谓词与 row-group filtering。iceberg-rust 0.10.1 没有行级 update/delete
+  事务 action，因此不测这两项。
 
 ### 公平性说明
 

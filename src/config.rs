@@ -65,6 +65,7 @@ pub struct BenchConfig {
     pub s3_region: String,
     pub lance_prefix: String,
     pub parquet_prefix: String,
+    pub iceberg_prefix: String,
 
     // IndexLake catalog.
     pub pg_host: String,
@@ -106,6 +107,7 @@ impl BenchConfig {
             s3_region: env_string("S3_REGION", "us-east-1"),
             lance_prefix: env_string("PERF_LANCE_PREFIX", "perf-eval/lance"),
             parquet_prefix: env_string("PERF_PARQUET_PREFIX", "perf-eval/parquet"),
+            iceberg_prefix: env_string("PERF_ICEBERG_PREFIX", "perf-eval/iceberg"),
 
             pg_host: env_string("PGHOST", "localhost"),
             pg_port: env_u16("PGPORT", 5432),

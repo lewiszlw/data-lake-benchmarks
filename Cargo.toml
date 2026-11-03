@@ -16,7 +16,10 @@ uuid = { version = "1", features = ["v4"] }
 arrow = "58"
 arrow-array = "58"
 arrow-schema = "58"
+bytes = "1"
 datafusion = { version = "54.1", default-features = false, features = ["parquet", "sql"] }
+iceberg = "0.10.1"
+iceberg-storage-opendal = { version = "0.10.1", default-features = false, features = ["opendal-s3"] }
 object_store = { version = "0.13", features = ["aws"] }
 opendal = "0.57"
 parquet = "58"
