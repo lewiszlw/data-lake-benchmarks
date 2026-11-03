@@ -192,13 +192,14 @@ warehouse 大小 132.4 MiB。
 #### 单条写入
 
 单条写入现在作为 ingest phase 的一部分执行。专用种子表先通过 bulk 路径写入
-100 万行，再逐条追加 100 条（5 次 warmup 不计入）。时间为每次写入。
+100 万行，再逐条追加 100 条（5 次 warmup 不计入）。表中为每次写入的算术平均
+延迟。
 
-| 引擎 | p50 (ms) | p95 (ms) | mean (ms) | min / max (ms) | p50 对应 inserts/s |
-|---|---:|---:|---:|---:|---:|
-| IndexLake | 1.304 | 1.643 | 1.361 | 0.958 / 4.291 | 767 |
-| Lance | 13.582 | 18.018 | 13.311 | 4.581 / 18.686 | 74 |
-| Iceberg | 26.834 | 33.793 | 27.364 | 14.418 / 40.925 | 37 |
+| 引擎 | 平均延迟 (ms) | 平均 writes/s |
+|---|---:|---:|
+| IndexLake | 1.361 | 735 |
+| Lance | 13.311 | 75 |
+| Iceberg | 27.364 | 37 |
 
 写入后状态：
 
@@ -208,7 +209,7 @@ warehouse 大小 132.4 MiB。
 | Lance | 153.9 MiB（327 objects） | 115 个 fragment（10 个种子 + 105 次单条 append） |
 | Iceberg | 138.4 MiB（434 objects） | 106 个 snapshot（1 次 seed + 105 次单条 append） |
 
-按 p50，Lance 单条写入比 IndexLake 慢约 10.4x；Iceberg 为 26.8 ms，约为
+按平均延迟，Lance 单条写入比 IndexLake 慢约 9.8x；Iceberg 为 27.4 ms，约为
 IndexLake 的 20x、Lance 的 2x。Iceberg 每条都写一个 data file 并提交一次
 snapshot，成本主要在 metadata/manifest 提交。IndexLake 只提交一条 PostgreSQL
 inline 行；其延迟 dump 未计入。

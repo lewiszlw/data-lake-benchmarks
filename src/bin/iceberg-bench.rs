@@ -358,7 +358,7 @@ async fn ingest(cfg: &BenchConfig, run_id: &str) {
         "payload mismatch for id={probe}"
     );
 
-    let stats = stats(samples);
+    let mean_ms = samples.iter().sum::<f64>() / samples.len() as f64;
     emit(
         "iceberg",
         "ingest",
@@ -367,12 +367,8 @@ async fn ingest(cfg: &BenchConfig, run_id: &str) {
             ("op", "single_write".to_string()),
             ("n", cfg.single_inserts.to_string()),
             ("warmups", INSERT_WARMUPS.to_string()),
-            ("p50_ms", format!("{:.3}", stats.p50)),
-            ("p95_ms", format!("{:.3}", stats.p95)),
-            ("mean_ms", format!("{:.3}", stats.mean)),
-            ("min_ms", format!("{:.3}", stats.min)),
-            ("max_ms", format!("{:.3}", stats.max)),
-            ("rows_per_s", format!("{:.1}", 1000.0 / stats.p50)),
+            ("mean_ms", format!("{:.3}", mean_ms)),
+            ("rows_per_s", format!("{:.1}", 1000.0 / mean_ms)),
         ],
     );
 
